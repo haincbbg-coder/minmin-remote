@@ -1,0 +1,32 @@
+name: build
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release
+        run: cargo build --release
+      - name: Test
+        run: cargo test --release
+      - name: Thu gom .exe
+        uses: actions/upload-artifact@v4
+        with:
+          name: mm-remote-windows
+          path: |
+            target/release/mm-server.exe
+            target/release/mm-viewer.exe
+
+  linux-check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Kiểm tra biên dịch + test phần cross-platform
+        run: cargo test --release

@@ -1,0 +1,22 @@
+[package]
+name = "mm-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "mm-server"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+mm-proto.workspace = true
+mm-crypto.workspace = true
+mm-transport.workspace = true
+mm-quic.workspace = true
+mm-capture.workspace = true
+mm-codec.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

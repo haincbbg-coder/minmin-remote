@@ -1,0 +1,15 @@
+[package]
+name = "mm-transport"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+tokio.workspace = true
+mm-proto.workspace = true
+mm-crypto.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+serde = { workspace = true }

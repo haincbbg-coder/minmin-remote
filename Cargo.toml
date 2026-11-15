@@ -1,0 +1,52 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mm-proto",
+    "crates/mm-crypto",
+    "crates/mm-transport",
+    "crates/mm-quic",
+    "crates/mm-codec",
+    "crates/mm-capture",
+    "crates/mm-server",
+    "crates/mm-viewer",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+authors = ["MinMin"]
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+serde = { version = "1", features = ["derive"] }
+bincode = "1.3"
+snow = "0.9"
+argon2 = "0.5"
+rand = "0.8"
+anyhow = "1"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+clap = { version = "4", features = ["derive", "env"] }
+
+# Transport hiện đại (v2)
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+bytes = "1"
+blake2 = "0.10"
+
+mm-proto = { path = "crates/mm-proto" }
+mm-crypto = { path = "crates/mm-crypto" }
+mm-transport = { path = "crates/mm-transport" }
+mm-quic = { path = "crates/mm-quic" }
+mm-codec = { path = "crates/mm-codec" }
+mm-capture = { path = "crates/mm-capture" }
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+strip = true
