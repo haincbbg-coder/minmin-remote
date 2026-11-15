@@ -1,0 +1,19 @@
+[package]
+name = "mm-viewer-gui"
+version = "0.1.0"
+edition = "2021"
+license = "Proprietary"
+
+[[bin]]
+name = "mm-viewer-gui"
+path = "src/main.rs"
+
+[dependencies]
+eframe = "0.29"
+egui = "0.29"
+tokio = { version = "1", features = ["full"] }
+anyhow = "1"
+mm-proto = { path = "../mm-proto" }
+mm-quic = { path = "../mm-quic" }
+mm-codec = { path = "../mm-codec" }
+quinn = "0.11"

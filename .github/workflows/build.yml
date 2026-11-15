@@ -13,6 +13,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Build release
         run: cargo build --release
+      - name: Build GUI
+        run: cargo build --release --manifest-path crates/mm-viewer-gui/Cargo.toml --target-dir target
       - name: Test
         run: cargo test --release
       - name: Thu gom .exe
@@ -22,6 +24,7 @@ jobs:
           path: |
             target/release/mm-server.exe
             target/release/mm-viewer.exe
+            target/release/mm-viewer-gui.exe
 
   linux-check:
     runs-on: ubuntu-latest

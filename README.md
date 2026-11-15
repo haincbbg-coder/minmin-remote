@@ -35,7 +35,8 @@ Giảm ~8 lần băng thông. Trên mạng yếu, đây là khác biệt giữa 
 | P1 | Xem màn hình + mã hoá + mật khẩu | ✅ |
 | **v2** | Codec dirty-rect + transport QUIC | ✅ lõi xong, đã kiểm thử |
 | **P2a** | **Điều khiển chuột/bàn phím** (SendInput) | ✅ đã kiểm thử; đường truyền e2e chạy, SendInput thật cho Windows |
-| P2b | Chụp màn hình thật (DXGI/GDI) + **H.265 phần cứng** | ⏳ |
+| **P2b** | Chụp màn hình thật (GDI) + **giao diện (egui)** | ✅ chụp GDI + GUI xem/điều khiển trực tiếp; chờ bố chạy thử |
+| P2c | H.265 phần cứng + danh bạ nhiều máy trên GUI | ⏳ |
 | P3 | Truyền file, dòng lệnh, nguồn | ⏳ |
 | P4 | Danh bạ, Tường màn hình, thao tác hàng loạt, nhật ký | ⏳ |
 | P5 | Kết nối qua Internet (NAT traversal), cài im lặng | ⏳ |
@@ -52,8 +53,13 @@ crates/
   mm-input      Tiêm chuột/bàn phím: Mock + SendInput (Windows)  ✅ test
   mm-capture    Chụp màn hình: Mock (mọi HĐH) + DXGI (Windows)   ✅ test
   mm-server     Máy bị điều khiển — chạy nền, không giao diện
-  mm-viewer     Người điều khiển — bản CLI (Tauri GUI ở P2)
+  mm-viewer     Người điều khiển — bản CLI (để kiểm thử/đo)
+  mm-viewer-gui Người điều khiển — cửa sổ egui: xem trực tiếp + điều khiển chuột/bàn phím
 ```
+
+mm-viewer-gui để ngoài workspace (`exclude`) nên `cargo test` ở gốc không đụng
+nó; build riêng: `cargo build --release --manifest-path crates/mm-viewer-gui/Cargo.toml`.
+Chạy: mở `mm-viewer-gui.exe`, nhập địa chỉ máy con + mật khẩu → Kết nối.
 
 Phần **chỉ Windows** còn lại: chụp màn hình thật bằng Desktop Duplication API
 (`mm-capture/src/dxgi.rs`) và mã hoá H.264 phần cứng — hoàn thiện khi build

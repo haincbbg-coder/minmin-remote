@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["crates/mm-viewer-gui"]
 members = [
     "crates/mm-proto",
     "crates/mm-crypto",
