@@ -163,6 +163,9 @@ impl ScreenCapture for MockDesktop {
 #[cfg(windows)]
 pub mod dxgi;
 
+#[cfg(windows)]
+pub mod gdi;
+
 #[cfg(test)]
 mod tests {
     use super::*;

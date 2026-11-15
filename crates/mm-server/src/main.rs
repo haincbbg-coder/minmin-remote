@@ -248,7 +248,7 @@ fn make_capture(args: &Args) -> Result<Box<dyn ScreenCapture>> {
     if args.real {
         #[cfg(windows)]
         {
-            return Ok(Box::new(mm_capture::dxgi::DxgiCapture::new()?));
+            return Ok(Box::new(mm_capture::gdi::GdiCapture::new()?));
         }
         #[cfg(not(windows))]
         {
