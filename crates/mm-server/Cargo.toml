@@ -14,6 +14,7 @@ mm-proto.workspace = true
 mm-crypto.workspace = true
 mm-transport.workspace = true
 mm-quic.workspace = true
+quinn.workspace = true
 mm-capture.workspace = true
 mm-codec.workspace = true
 mm-input.workspace = true

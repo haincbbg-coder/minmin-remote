@@ -132,6 +132,41 @@ pub struct FrameHeader {
     pub keyframe: bool,
 }
 
+/// Thông tin một máy con trong danh bạ relay.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeviceInfo {
+    pub device_id: String,
+    pub device_name: String,
+    pub online: bool,
+}
+
+/// Gói tin giữa client (máy con / viewer) và máy chủ cầu nối (mm-relay).
+/// Đi trên kênh control; dữ liệu màn hình đi trên ống data do relay bắc cầu.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum RelayMessage {
+    // ---- client -> relay ----
+    /// Máy con đăng ký và báo danh online.
+    RegisterDevice { account: String, device_id: String, device_name: String },
+    /// Viewer đăng nhập để lấy danh bạ máy cùng tài khoản.
+    LoginViewer { account: String },
+    /// Viewer yêu cầu nối tới một máy con.
+    ConnectTo { device_id: String },
+    /// Giữ kết nối sống.
+    Heartbeat,
+
+    // ---- relay -> client ----
+    /// Xác nhận đăng ký máy con xong.
+    Registered,
+    /// Danh bạ máy con (gửi cho viewer khi đăng nhập và khi có thay đổi).
+    Devices(Vec<DeviceInfo>),
+    /// Báo máy con có người muốn nối; máy con mở ống data mang số phiên này.
+    IncomingSession { session: u64, viewer: String },
+    /// Báo viewer phiên đã sẵn sàng; viewer mở ống data mang số phiên này.
+    SessionReady { session: u64 },
+    /// Lỗi (không tìm thấy máy, máy offline, sai tài khoản…).
+    RelayError { message: String },
+}
+
 /// Lỗi khi mã hoá/giải mã gói tin.
 #[derive(Debug, thiserror::Error)]
 pub enum ProtoError {

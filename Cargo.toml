@@ -6,6 +6,7 @@ members = [
     "crates/mm-crypto",
     "crates/mm-transport",
     "crates/mm-quic",
+    "crates/mm-relay",
     "crates/mm-codec",
     "crates/mm-input",
     "crates/mm-capture",

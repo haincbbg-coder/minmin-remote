@@ -43,6 +43,15 @@ struct Args {
     /// Gửi một chuỗi chuột/bàn phím thử (bật chế độ FullControl) để kiểm chứng điều khiển.
     #[arg(long, default_value_t = false)]
     demo_input: bool,
+    /// Địa chỉ máy chủ cầu nối (mm-relay). Có giá trị = chạy chế độ relay.
+    #[arg(long)]
+    relay: Option<String>,
+    /// Tài khoản (nhóm máy) khi dùng relay.
+    #[arg(long, default_value = "halimi")]
+    account: String,
+    /// Mã máy con muốn nối qua relay; bỏ trống chỉ để liệt kê danh bạ.
+    #[arg(long)]
+    connect: Option<String>,
 }
 
 /// Chuỗi input mẫu: ra giữa màn hình, click trái, gõ phím A, cuộn chuột.
@@ -105,11 +114,66 @@ async fn main() -> Result<()> {
         .init();
     let args = Args::parse();
     std::fs::create_dir_all(&args.out).ok();
-    if args.transport == "tcp" {
+    if args.relay.is_some() {
+        run_relay(args).await
+    } else if args.transport == "tcp" {
         run_tcp(args).await
     } else {
         run_quic(args).await
     }
+}
+
+/// Chế độ relay: đăng nhập relay, lấy danh bạ máy online; nếu có --connect thì
+/// nối tới máy đó qua ống bắc cầu và xem như kết nối trực tiếp.
+async fn run_relay(args: Args) -> Result<()> {
+    use mm_proto::RelayMessage;
+    let relay_addr: std::net::SocketAddr = args.relay.clone().unwrap().parse()?;
+    let endpoint = mm_quic::client_endpoint()?;
+    let conn = endpoint.connect(relay_addr, "mm")?.await?;
+    info!("đã nối relay {relay_addr}");
+
+    let (mut cs, mut cr) = conn.open_bi().await?;
+    relay_send(&mut cs, &RelayMessage::LoginViewer { account: args.account.clone() }).await?;
+    match relay_recv(&mut cr).await? {
+        RelayMessage::Devices(list) => {
+            println!("Danh bạ máy [{}]:", args.account);
+            for d in &list {
+                println!("  - {} ({}){}", d.device_name, d.device_id, if d.online { " · online" } else { "" });
+            }
+            if list.is_empty() {
+                println!("  (chưa có máy nào online)");
+            }
+        }
+        other => return Err(anyhow!("relay trả lời bất ngờ: {:?}", other)),
+    }
+
+    let device_id = match &args.connect {
+        Some(id) => id.clone(),
+        None => return Ok(()), // chỉ liệt kê
+    };
+
+    relay_send(&mut cs, &RelayMessage::ConnectTo { device_id: device_id.clone() }).await?;
+    let session = match relay_recv(&mut cr).await? {
+        RelayMessage::SessionReady { session } => session,
+        RelayMessage::RelayError { message } => return Err(anyhow!("relay: {message}")),
+        other => return Err(anyhow!("chờ SessionReady, nhận {:?}", other)),
+    };
+    info!("nối tới máy \"{device_id}\" qua relay (phiên {session})");
+
+    let (mut send, recv) = conn.open_bi().await?;
+    mm_transport::write_frame(&mut send, &session.to_be_bytes()).await?;
+    let stream = tokio::io::join(recv, send);
+    run_stream(stream, args).await
+}
+
+async fn relay_send(s: &mut quinn::SendStream, m: &mm_proto::RelayMessage) -> Result<()> {
+    mm_transport::write_frame(s, &mm_proto::encode(m)?).await?;
+    Ok(())
+}
+
+async fn relay_recv(r: &mut quinn::RecvStream) -> Result<mm_proto::RelayMessage> {
+    let bytes = mm_transport::read_frame(r).await?;
+    Ok(mm_proto::decode(&bytes)?)
 }
 
 async fn run_quic(args: Args) -> Result<()> {
@@ -168,12 +232,20 @@ async fn run_quic(args: Args) -> Result<()> {
 }
 
 async fn run_tcp(args: Args) -> Result<()> {
-    let psk = mm_crypto::derive_psk(&args.password)?;
     let addr = format!("{}:{}", args.host, args.port);
-    let mut stream = TcpStream::connect(&addr).await?;
+    let stream = TcpStream::connect(&addr).await?;
     stream.set_nodelay(true).ok();
     info!("đã nối tới {addr}, đang bắt tay...");
+    run_stream(stream, args).await
+}
 
+/// Chạy một phiên xem (bắt tay Noise + nhận khung) trên BẤT KỲ ống nào:
+/// TcpStream trực tiếp hoặc ống data do relay bắc cầu.
+async fn run_stream<S>(mut stream: S, args: Args) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let psk = mm_crypto::derive_psk(&args.password)?;
     let session = mm_transport::handshake_initiator(&mut stream, &psk).await?;
     let (mut reader, mut writer) = mm_transport::secure_split(stream, session);
 

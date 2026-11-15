@@ -37,6 +37,7 @@ Giảm ~8 lần băng thông. Trên mạng yếu, đây là khác biệt giữa 
 | **P2a** | **Điều khiển chuột/bàn phím** (SendInput) | ✅ đã kiểm thử; đường truyền e2e chạy, SendInput thật cho Windows |
 | **P2b** | Chụp màn hình thật (GDI) + **giao diện (egui)** | ✅ chụp GDI + GUI xem/điều khiển trực tiếp; chờ bố chạy thử |
 | P2c | H.265 phần cứng + danh bạ nhiều máy trên GUI | ⏳ |
+| **P5** | Cầu nối qua VPS (relay): tài khoản, danh bạ online, nối qua Internet | ✅ chế độ chuyển tiếp qua relay xong, đã kiểm thử e2e; đục NAT nối thẳng để sau |
 | P3 | Truyền file, dòng lệnh, nguồn | ⏳ |
 | P4 | Danh bạ, Tường màn hình, thao tác hàng loạt, nhật ký | ⏳ |
 | P5 | Kết nối qua Internet (NAT traversal), cài im lặng | ⏳ |
@@ -55,7 +56,29 @@ crates/
   mm-server     Máy bị điều khiển — chạy nền, không giao diện
   mm-viewer     Người điều khiển — bản CLI (để kiểm thử/đo)
   mm-viewer-gui Người điều khiển — cửa sổ egui: xem trực tiếp + điều khiển chuột/bàn phím
+  mm-relay      Máy chủ cầu nối trên VPS: danh bạ máy online + bắc cầu qua Internet
 ```
+
+## Kết nối qua Internet bằng cầu nối (P5)
+
+Đặt `mm-relay` trên VPS có IP công khai (mở cổng 5000):
+```bash
+mm-relay --port 5000
+```
+Mỗi máy con đăng ký lên relay (chạy nền, ẩn):
+```bash
+set MM_PASSWORD=matkhau-may
+mm-server --relay <ip-vps>:5000 --account halimi --device-id vm01 --device-name "VM-01"
+```
+Máy bố xem danh bạ rồi nối qua relay:
+```bash
+set MM_PASSWORD=matkhau-may
+mm-viewer --relay <ip-vps>:5000 --account halimi                 # liệt kê máy online
+mm-viewer --relay <ip-vps>:5000 --account halimi --connect vm01  # nối tới VM-01
+```
+Relay chỉ bơm byte hai chiều; bắt tay mật khẩu và mã hoá chạy đầu-cuối nên relay
+không đọc được nội dung. Chế độ hiện tại chuyển tiếp qua relay (chạy với mọi NAT);
+đục NAT để nối thẳng là bước tối ưu sau. Danh bạ relay trên GUI sẽ thêm ở P2c.
 
 mm-viewer-gui để ngoài workspace (`exclude`) nên `cargo test` ở gốc không đụng
 nó; build riêng: `cargo build --release --manifest-path crates/mm-viewer-gui/Cargo.toml`.

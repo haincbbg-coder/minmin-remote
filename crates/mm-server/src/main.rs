@@ -54,6 +54,18 @@ struct Args {
     /// Transport: quic (v2, khuyên dùng) hoặc tcp (P1).
     #[arg(long, default_value = "quic")]
     transport: String,
+    /// Địa chỉ máy chủ cầu nối (mm-relay). Có giá trị = chạy chế độ relay.
+    #[arg(long)]
+    relay: Option<String>,
+    /// Tài khoản (nhóm máy) khi dùng relay.
+    #[arg(long, default_value = "halimi")]
+    account: String,
+    /// Mã máy (duy nhất trong tài khoản) khi dùng relay.
+    #[arg(long, default_value = "may-con-1")]
+    device_id: String,
+    /// Tên máy hiển thị trong danh bạ.
+    #[arg(long, default_value = "Máy con")]
+    device_name: String,
 }
 
 /// Nén một khung theo codec đã chọn, trả về (header, payload).
@@ -87,11 +99,91 @@ async fn main() -> Result<()> {
         .init();
 
     let args = Args::parse();
-    if args.transport == "tcp" {
+    if args.relay.is_some() {
+        run_relay(args).await
+    } else if args.transport == "tcp" {
         run_tcp(args).await
     } else {
         run_quic(args).await
     }
+}
+
+/// Chế độ relay: đăng ký lên mm-relay, báo danh online, và khi có viewer muốn
+/// nối thì mở ống data qua relay rồi phục vụ y như một kết nối trực tiếp.
+async fn run_relay(args: Args) -> Result<()> {
+    use mm_proto::RelayMessage;
+    let relay_addr: std::net::SocketAddr = args.relay.clone().unwrap().parse()?;
+    let psk = mm_crypto::derive_psk(&args.password)?;
+    let endpoint = mm_quic::client_endpoint()?;
+    let conn = endpoint.connect(relay_addr, "mm")?.await?;
+    info!("đã nối tới relay {relay_addr}");
+
+    let (mut cs, mut cr) = conn.open_bi().await?;
+    relay_send(&mut cs, &RelayMessage::RegisterDevice {
+        account: args.account.clone(),
+        device_id: args.device_id.clone(),
+        device_name: args.device_name.clone(),
+    })
+    .await?;
+    match relay_recv(&mut cr).await? {
+        RelayMessage::Registered => info!("đã đăng ký máy \"{}\" lên relay", args.device_name),
+        other => warn!("relay trả lời bất ngờ: {:?}", other),
+    }
+
+    // Heartbeat giữ kết nối.
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(20)).await;
+            if relay_send(&mut cs, &RelayMessage::Heartbeat).await.is_err() {
+                break;
+            }
+        }
+    });
+
+    // Chờ thông báo có viewer muốn nối → mở ống data và phục vụ.
+    loop {
+        match relay_recv(&mut cr).await {
+            Ok(RelayMessage::IncomingSession { session, viewer }) => {
+                info!("có \"{viewer}\" muốn nối (phiên {session})");
+                let conn = conn.clone();
+                let args = args.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = serve_relay_session(conn, session, psk, args).await {
+                        warn!("phiên relay {session} lỗi: {e}");
+                    }
+                });
+            }
+            Ok(_) => {}
+            Err(e) => {
+                warn!("mất kết nối relay: {e}");
+                break;
+            }
+        }
+    }
+    Ok(())
+}
+
+async fn serve_relay_session(
+    conn: quinn::Connection,
+    session: u64,
+    psk: [u8; 32],
+    args: Args,
+) -> Result<()> {
+    let (mut send, recv) = conn.open_bi().await?;
+    // Khung đầu = số phiên để relay ghép đúng.
+    mm_transport::write_frame(&mut send, &session.to_be_bytes()).await?;
+    let stream = tokio::io::join(recv, send);
+    serve_stream(stream, psk, args).await
+}
+
+async fn relay_send(s: &mut quinn::SendStream, m: &mm_proto::RelayMessage) -> Result<()> {
+    mm_transport::write_frame(s, &mm_proto::encode(m)?).await?;
+    Ok(())
+}
+
+async fn relay_recv(r: &mut quinn::RecvStream) -> Result<mm_proto::RelayMessage> {
+    let bytes = mm_transport::read_frame(r).await?;
+    Ok(mm_proto::decode(&bytes)?)
 }
 
 async fn run_tcp(args: Args) -> Result<()> {
@@ -265,6 +357,15 @@ fn make_capture(args: &Args) -> Result<Box<dyn ScreenCapture>> {
 
 async fn handle_conn(mut stream: TcpStream, psk: [u8; 32], args: Args) -> Result<()> {
     stream.set_nodelay(true).ok();
+    serve_stream(stream, psk, args).await
+}
+
+/// Phục vụ một phiên (Noise + chỉ xem/điều khiển) trên BẤT KỲ ống nào:
+/// TcpStream (LAN trực tiếp) hoặc ống data do relay bắc cầu (qua Internet).
+async fn serve_stream<S>(mut stream: S, psk: [u8; 32], args: Args) -> Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
     // Bắt tay Noise: sai mật khẩu sẽ hỏng ngay tại đây.
     let session = mm_transport::handshake_responder(&mut stream, &psk).await?;
     let (mut reader, mut writer) = mm_transport::secure_split(stream, session);
