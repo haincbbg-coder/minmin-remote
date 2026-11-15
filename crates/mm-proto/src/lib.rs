@@ -160,9 +160,11 @@ pub enum RelayMessage {
     /// Danh bạ máy con (gửi cho viewer khi đăng nhập và khi có thay đổi).
     Devices(Vec<DeviceInfo>),
     /// Báo máy con có người muốn nối; máy con mở ống data mang số phiên này.
-    IncomingSession { session: u64, viewer: String },
+    /// `peer_addr` là địa chỉ công khai của viewer (để thử đục NAT nối thẳng).
+    IncomingSession { session: u64, viewer: String, peer_addr: String },
     /// Báo viewer phiên đã sẵn sàng; viewer mở ống data mang số phiên này.
-    SessionReady { session: u64 },
+    /// `peer_addr` là địa chỉ công khai của máy con (để thử đục NAT nối thẳng).
+    SessionReady { session: u64, peer_addr: String },
     /// Lỗi (không tìm thấy máy, máy offline, sai tài khoản…).
     RelayError { message: String },
 }

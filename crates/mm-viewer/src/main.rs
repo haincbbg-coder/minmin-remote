@@ -128,7 +128,8 @@ async fn main() -> Result<()> {
 async fn run_relay(args: Args) -> Result<()> {
     use mm_proto::RelayMessage;
     let relay_addr: std::net::SocketAddr = args.relay.clone().unwrap().parse()?;
-    let endpoint = mm_quic::client_endpoint()?;
+    // Endpoint hai chiều: cùng socket cho relay và cho đục NAT nối thẳng.
+    let endpoint = mm_quic::dual_endpoint("0.0.0.0:0".parse()?)?;
     let conn = endpoint.connect(relay_addr, "mm")?.await?;
     info!("đã nối relay {relay_addr}");
 
@@ -153,13 +154,29 @@ async fn run_relay(args: Args) -> Result<()> {
     };
 
     relay_send(&mut cs, &RelayMessage::ConnectTo { device_id: device_id.clone() }).await?;
-    let session = match relay_recv(&mut cr).await? {
-        RelayMessage::SessionReady { session } => session,
+    let (session, peer_addr) = match relay_recv(&mut cr).await? {
+        RelayMessage::SessionReady { session, peer_addr } => (session, peer_addr),
         RelayMessage::RelayError { message } => return Err(anyhow!("relay: {message}")),
         other => return Err(anyhow!("chờ SessionReady, nhận {:?}", other)),
     };
-    info!("nối tới máy \"{device_id}\" qua relay (phiên {session})");
 
+    // Thử nối thẳng (đục NAT) tới địa chỉ công khai của máy con trước.
+    if let Ok(peer) = peer_addr.parse::<std::net::SocketAddr>() {
+        info!("thử đục NAT nối thẳng tới {peer}...");
+        match mm_quic::punch_connect(&endpoint, peer, std::time::Duration::from_secs(5)).await {
+            Ok(direct) => match mm_quic::client_auth(direct, &args.password).await {
+                Ok(csession) => {
+                    info!("NỐI THẲNG được tới \"{device_id}\" (không qua relay)");
+                    return run_quic_session(csession, args).await;
+                }
+                Err(e) => info!("auth nối thẳng lỗi ({e}), dùng relay"),
+            },
+            Err(e) => info!("đục NAT không được ({e}), dùng relay"),
+        }
+    }
+
+    // Quay về chạy qua relay (bắc cầu byte).
+    info!("nối tới máy \"{device_id}\" qua relay (phiên {session})");
     let (mut send, recv) = conn.open_bi().await?;
     mm_transport::write_frame(&mut send, &session.to_be_bytes()).await?;
     let stream = tokio::io::join(recv, send);
@@ -180,8 +197,12 @@ async fn run_quic(args: Args) -> Result<()> {
     let addr: std::net::SocketAddr = format!("{}:{}", args.host, args.port).parse()?;
     let endpoint = mm_quic::client_endpoint()?;
     info!("đang nối QUIC tới {addr}...");
-    let mut session = mm_quic::connect(&endpoint, addr, &args.password).await?;
+    let session = mm_quic::connect(&endpoint, addr, &args.password).await?;
+    run_quic_session(session, args).await
+}
 
+/// Chạy phiên xem trên một kết nối QUIC đã xác thực (trực tiếp hoặc đục NAT).
+async fn run_quic_session(mut session: mm_quic::ClientSession, args: Args) -> Result<()> {
     session
         .control
         .send(&ClientMessage::Hello {

@@ -46,6 +46,7 @@ struct Half {
 struct Device {
     account: String,
     name: String,
+    public_addr: String,
     push: UnboundedSender<RelayMessage>,
 }
 
@@ -140,9 +141,15 @@ async fn run_device(
     state: Arc<State>,
 ) -> Result<()> {
     let (push, mut push_rx) = unbounded_channel::<RelayMessage>();
+    let public_addr = conn.remote_address().to_string();
     state.devices.lock().unwrap().insert(
         device_id.clone(),
-        Device { account: account.clone(), name: device_name.clone(), push },
+        Device {
+            account: account.clone(),
+            name: device_name.clone(),
+            public_addr,
+            push,
+        },
     );
     info!("máy con \"{device_name}\" ({device_id}) online [{account}]");
     send_msg(&mut cs, &RelayMessage::Registered).await?;
@@ -177,28 +184,37 @@ async fn run_viewer(
     // Task đọc yêu cầu ConnectTo từ viewer.
     let st = state.clone();
     let acc = account.clone();
+    let viewer_public = conn.remote_address().to_string();
     tokio::spawn(async move {
         loop {
             match recv_msg(&mut cr).await {
                 Ok(RelayMessage::ConnectTo { device_id }) => {
                     let session = st.session_seq.fetch_add(1, Ordering::SeqCst) + 1;
-                    let pushed = {
+                    // Trao đổi địa chỉ công khai để hai bên thử đục NAT nối thẳng.
+                    let device_public = {
                         let devices = st.devices.lock().unwrap();
                         match devices.get(&device_id) {
-                            Some(d) if d.account == acc => d
-                                .push
-                                .send(RelayMessage::IncomingSession {
-                                    session,
-                                    viewer: "viewer".into(),
-                                })
-                                .is_ok(),
-                            _ => false,
+                            Some(d) if d.account == acc => {
+                                let ok = d
+                                    .push
+                                    .send(RelayMessage::IncomingSession {
+                                        session,
+                                        viewer: "viewer".into(),
+                                        peer_addr: viewer_public.clone(),
+                                    })
+                                    .is_ok();
+                                if ok {
+                                    Some(d.public_addr.clone())
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
                         }
                     };
-                    let reply = if pushed {
-                        RelayMessage::SessionReady { session }
-                    } else {
-                        RelayMessage::RelayError { message: "máy không online".into() }
+                    let reply = match device_public {
+                        Some(addr) => RelayMessage::SessionReady { session, peer_addr: addr },
+                        None => RelayMessage::RelayError { message: "máy không online".into() },
                     };
                     if send_msg(&mut cs, &reply).await.is_err() {
                         break;

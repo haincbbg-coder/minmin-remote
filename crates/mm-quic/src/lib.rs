@@ -42,23 +42,52 @@ fn auth_response(password: &str, challenge: &[u8]) -> Result<[u8; 32]> {
 
 // ----------------------- Server -----------------------
 
-/// Mở endpoint QUIC phía Server với cert tự ký.
-pub fn server_endpoint(addr: std::net::SocketAddr) -> Result<quinn::Endpoint> {
+fn server_crypto() -> Result<quinn::ServerConfig> {
     ensure_provider();
     let cert = rcgen::generate_simple_self_signed(vec!["mm".to_string()])?;
     let cert_der = rustls::pki_types::CertificateDer::from(cert.cert.der().to_vec());
-    let key_der =
-        rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())
-            .map_err(|e| anyhow!("khoá: {e}"))?;
-
+    let key_der = rustls::pki_types::PrivateKeyDer::try_from(cert.key_pair.serialize_der())
+        .map_err(|e| anyhow!("khoá: {e}"))?;
     let mut tls = rustls::ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(vec![cert_der], key_der)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
-
     let qsc = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
-    let server_config = quinn::ServerConfig::with_crypto(Arc::new(qsc));
-    Ok(quinn::Endpoint::server(server_config, addr)?)
+    Ok(quinn::ServerConfig::with_crypto(Arc::new(qsc)))
+}
+
+fn client_cfg() -> Result<quinn::ClientConfig> {
+    ensure_provider();
+    let verifier = Arc::new(SkipServerVerification::new());
+    let mut tls = rustls::ClientConfig::builder()
+        .dangerous()
+        .with_custom_certificate_verifier(verifier)
+        .with_no_client_auth();
+    tls.alpn_protocols = vec![ALPN.to_vec()];
+    let qcc = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
+    Ok(quinn::ClientConfig::new(Arc::new(qcc)))
+}
+
+/// Mở endpoint QUIC phía Server với cert tự ký.
+pub fn server_endpoint(addr: std::net::SocketAddr) -> Result<quinn::Endpoint> {
+    Ok(quinn::Endpoint::server(server_crypto()?, addr)?)
+}
+
+/// Mở endpoint QUIC phía Client (Viewer).
+pub fn client_endpoint() -> Result<quinn::Endpoint> {
+    ensure_provider();
+    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
+    endpoint.set_default_client_config(client_cfg()?);
+    Ok(endpoint)
+}
+
+/// Endpoint vừa gọi (client) vừa nhận (server) trên CÙNG một socket — dùng cho
+/// đục NAT: kết nối tới relay và kết nối thẳng P2P đi chung một socket để giữ
+/// nguyên ánh xạ NAT.
+pub fn dual_endpoint(bind: std::net::SocketAddr) -> Result<quinn::Endpoint> {
+    let mut endpoint = quinn::Endpoint::server(server_crypto()?, bind)?;
+    endpoint.set_default_client_config(client_cfg()?);
+    Ok(endpoint)
 }
 
 /// Phiên QUIC phía Server sau khi xác thực xong.
@@ -67,17 +96,11 @@ pub struct ServerSession {
     pub control: Channel,
 }
 
-/// Chờ một kết nối, bắt tay, xác thực mật khẩu trên control stream.
-pub async fn accept(endpoint: &quinn::Endpoint, password: &str) -> Result<ServerSession> {
-    let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint đóng"))?;
-    let conn = incoming.await?;
+/// Xác thực mật khẩu trên một Connection đã bắt tay QUIC (phía nhận).
+pub async fn server_auth(conn: quinn::Connection, password: &str) -> Result<ServerSession> {
     let (send, recv) = conn.accept_bi().await?;
     let mut control = Channel { send, recv };
-
-    // Client gửi gói mở đầu để thực sự tạo stream; đọc và bỏ qua.
     let _opener = control.read_raw().await?;
-
-    // Gửi challenge ngẫu nhiên, chờ đáp án.
     let mut challenge = [0u8; 32];
     use rand::RngCore;
     rand::thread_rng().fill_bytes(&mut challenge);
@@ -93,24 +116,14 @@ pub async fn accept(endpoint: &quinn::Endpoint, password: &str) -> Result<Server
     Ok(ServerSession { conn, control })
 }
 
-// ----------------------- Client -----------------------
-
-/// Mở endpoint QUIC phía Client (Viewer).
-pub fn client_endpoint() -> Result<quinn::Endpoint> {
-    ensure_provider();
-    let verifier = Arc::new(SkipServerVerification::new());
-    let mut tls = rustls::ClientConfig::builder()
-        .dangerous()
-        .with_custom_certificate_verifier(verifier)
-        .with_no_client_auth();
-    tls.alpn_protocols = vec![ALPN.to_vec()];
-
-    let qcc = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
-    let client_config = quinn::ClientConfig::new(Arc::new(qcc));
-    let mut endpoint = quinn::Endpoint::client("0.0.0.0:0".parse()?)?;
-    endpoint.set_default_client_config(client_config);
-    Ok(endpoint)
+/// Chờ một kết nối, bắt tay, xác thực mật khẩu.
+pub async fn accept(endpoint: &quinn::Endpoint, password: &str) -> Result<ServerSession> {
+    let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint đóng"))?;
+    let conn = incoming.await?;
+    server_auth(conn, password).await
 }
+
+// ----------------------- Client -----------------------
 
 /// Phiên QUIC phía Client sau khi xác thực xong.
 pub struct ClientSession {
@@ -118,16 +131,10 @@ pub struct ClientSession {
     pub control: Channel,
 }
 
-/// Nối tới Server, bắt tay, chứng minh mật khẩu.
-pub async fn connect(
-    endpoint: &quinn::Endpoint,
-    addr: std::net::SocketAddr,
-    password: &str,
-) -> Result<ClientSession> {
-    let conn = endpoint.connect(addr, "mm")?.await?;
+/// Xác thực mật khẩu trên một Connection đã bắt tay QUIC (phía gọi).
+pub async fn client_auth(conn: quinn::Connection, password: &str) -> Result<ClientSession> {
     let (send, recv) = conn.open_bi().await?;
     let mut control = Channel { send, recv };
-    // QUIC mở stream lười: phải gửi trước thì server mới thấy stream.
     control.write_raw(b"MMR1").await?;
     let challenge = control.read_raw().await?;
     let resp = auth_response(password, &challenge)?;
@@ -137,6 +144,82 @@ pub async fn connect(
         return Err(anyhow!("server từ chối: sai mật khẩu"));
     }
     Ok(ClientSession { conn, control })
+}
+
+/// Nối tới Server, bắt tay, chứng minh mật khẩu.
+pub async fn connect(
+    endpoint: &quinn::Endpoint,
+    addr: std::net::SocketAddr,
+    password: &str,
+) -> Result<ClientSession> {
+    let conn = endpoint.connect(addr, "mm")?.await?;
+    client_auth(conn, password).await
+}
+
+// ----------------------- Đục NAT (hole punching) -----------------------
+
+/// Phía gọi (viewer): liên tục thử nối thẳng tới địa chỉ công khai của peer đến
+/// khi được hoặc quá hạn. Trả về Connection đã bắt tay QUIC (chưa auth app).
+pub async fn punch_connect(
+    endpoint: &quinn::Endpoint,
+    peer: std::net::SocketAddr,
+    total: std::time::Duration,
+) -> Result<quinn::Connection> {
+    let deadline = tokio::time::Instant::now() + total;
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            anyhow::bail!("đục NAT (connect) quá hạn");
+        }
+        if let Ok(connecting) = endpoint.connect(peer, "mm") {
+            if let Ok(Ok(conn)) =
+                tokio::time::timeout(std::time::Duration::from_millis(900), connecting).await
+            {
+                return Ok(conn);
+            }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
+/// Phía nhận (device): vừa bắn gói "đục lỗ" tới peer để mở NAT, vừa chờ kết nối
+/// thẳng tới. Trả về Connection đã bắt tay QUIC (chưa auth app).
+pub async fn punch_accept(
+    endpoint: &quinn::Endpoint,
+    peer: std::net::SocketAddr,
+    total: std::time::Duration,
+) -> Result<quinn::Connection> {
+    let ep = endpoint.clone();
+    let punch = tokio::spawn(async move {
+        let end = tokio::time::Instant::now() + total;
+        while tokio::time::Instant::now() < end {
+            if let Ok(connecting) = ep.connect(peer, "mm") {
+                let _ = tokio::time::timeout(std::time::Duration::from_millis(300), connecting).await;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+        }
+    });
+    let res = tokio::time::timeout(total, async {
+        loop {
+            let incoming = endpoint.accept().await.ok_or_else(|| anyhow!("endpoint đóng"))?;
+            let remote = incoming.remote_address();
+            match incoming.await {
+                Ok(conn) => {
+                    if remote.ip() == peer.ip() {
+                        return Ok::<quinn::Connection, anyhow::Error>(conn);
+                    }
+                    conn.close(0u32.into(), b"not peer");
+                }
+                Err(_) => {}
+            }
+        }
+    })
+    .await;
+    punch.abort();
+    match res {
+        Ok(Ok(conn)) => Ok(conn),
+        Ok(Err(e)) => Err(e),
+        Err(_) => anyhow::bail!("đục NAT (accept) quá hạn"),
+    }
 }
 
 // ----------------------- Kênh control -----------------------

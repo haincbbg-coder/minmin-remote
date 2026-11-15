@@ -114,7 +114,8 @@ async fn run_relay(args: Args) -> Result<()> {
     use mm_proto::RelayMessage;
     let relay_addr: std::net::SocketAddr = args.relay.clone().unwrap().parse()?;
     let psk = mm_crypto::derive_psk(&args.password)?;
-    let endpoint = mm_quic::client_endpoint()?;
+    // Endpoint hai chiều: cùng socket cho relay và cho đục NAT nối thẳng.
+    let endpoint = mm_quic::dual_endpoint("0.0.0.0:0".parse()?)?;
     let conn = endpoint.connect(relay_addr, "mm")?.await?;
     info!("đã nối tới relay {relay_addr}");
 
@@ -143,11 +144,30 @@ async fn run_relay(args: Args) -> Result<()> {
     // Chờ thông báo có viewer muốn nối → mở ống data và phục vụ.
     loop {
         match relay_recv(&mut cr).await {
-            Ok(RelayMessage::IncomingSession { session, viewer }) => {
-                info!("có \"{viewer}\" muốn nối (phiên {session})");
+            Ok(RelayMessage::IncomingSession { session, viewer, peer_addr }) => {
+                info!("có \"{viewer}\" muốn nối (phiên {session}), thử đục NAT tới {peer_addr}");
                 let conn = conn.clone();
+                let endpoint = endpoint.clone();
                 let args = args.clone();
                 tokio::spawn(async move {
+                    // Thử nối thẳng (đục NAT) trước; hỏng thì quay về chạy qua relay.
+                    if let Ok(peer) = peer_addr.parse::<std::net::SocketAddr>() {
+                        match mm_quic::punch_accept(&endpoint, peer, Duration::from_secs(5)).await {
+                            Ok(direct) => {
+                                info!("phiên {session}: NỐI THẲNG được (không qua relay)");
+                                match mm_quic::server_auth(direct, &args.password).await {
+                                    Ok(sess) => {
+                                        if let Err(e) = handle_conn_quic(sess, args).await {
+                                            warn!("phiên thẳng {session} lỗi: {e}");
+                                        }
+                                        return;
+                                    }
+                                    Err(e) => warn!("auth phiên thẳng {session} lỗi: {e}"),
+                                }
+                            }
+                            Err(e) => info!("phiên {session}: đục NAT không được ({e}), dùng relay"),
+                        }
+                    }
                     if let Err(e) = serve_relay_session(conn, session, psk, args).await {
                         warn!("phiên relay {session} lỗi: {e}");
                     }

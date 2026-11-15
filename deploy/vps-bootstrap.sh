@@ -37,7 +37,8 @@ WantedBy=multi-user.target
 UNIT
 
 systemctl daemon-reload
-systemctl enable --now mm-relay
+systemctl enable mm-relay
+systemctl restart mm-relay   # restart để cập nhật nếu đã chạy sẵn
 
 # Mở cổng UDP nếu ufw đang bật (QUIC chạy trên UDP).
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
