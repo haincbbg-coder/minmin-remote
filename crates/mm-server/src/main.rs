@@ -39,10 +39,13 @@ struct Args {
     /// Chất lượng JPEG (1..=100).
     #[arg(long, default_value_t = 70)]
     quality: u8,
-    /// Dùng chụp màn hình thật (Windows). Bỏ trống = nguồn giả để kiểm thử.
+    /// (Cũ, không cần nữa) ép quay màn hình thật. Windows nay mặc định đã bật.
     #[arg(long, default_value_t = false)]
     real: bool,
-    /// Kích thước nguồn giả khi không dùng --real.
+    /// Dùng ảnh demo giả để kiểm thử thay vì quay màn hình thật.
+    #[arg(long, default_value_t = false)]
+    mock: bool,
+    /// Kích thước nguồn giả khi dùng --mock.
     #[arg(long, default_value = "1280x720")]
     mock_size: String,
     /// Kiểu nguồn giả: desktop (phần lớn tĩnh) hoặc moving (đổi toàn màn hình).
@@ -357,13 +360,16 @@ fn parse_size(s: &str) -> (u32, u32) {
 }
 
 fn make_capture(args: &Args) -> Result<Box<dyn ScreenCapture>> {
-    if args.real {
-        #[cfg(windows)]
-        {
+    // Mặc định quay màn hình THẬT trên Windows; chỉ dùng ảnh giả khi có --mock.
+    #[cfg(windows)]
+    {
+        if !args.mock {
             return Ok(Box::new(mm_capture::gdi::GdiCapture::new()?));
         }
-        #[cfg(not(windows))]
-        {
+    }
+    #[cfg(not(windows))]
+    {
+        if args.real && !args.mock {
             anyhow::bail!("--real chỉ hỗ trợ trên Windows; bỏ cờ này để dùng nguồn giả");
         }
     }
