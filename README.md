@@ -36,8 +36,9 @@ Giảm ~8 lần băng thông. Trên mạng yếu, đây là khác biệt giữa 
 | **v2** | Codec dirty-rect + transport QUIC | ✅ lõi xong, đã kiểm thử |
 | **P2a** | **Điều khiển chuột/bàn phím** (SendInput) | ✅ đã kiểm thử; đường truyền e2e chạy, SendInput thật cho Windows |
 | **P2b** | Chụp màn hình thật (GDI) + **giao diện (egui)** | ✅ chụp GDI + GUI xem/điều khiển trực tiếp; chờ bố chạy thử |
-| P2c | H.265 phần cứng + danh bạ nhiều máy trên GUI | ⏳ |
-| **P5** | Cầu nối qua VPS (relay): tài khoản, danh bạ online, nối qua Internet | ✅ chế độ chuyển tiếp qua relay xong, đã kiểm thử e2e; đục NAT nối thẳng để sau |
+| **P5** | Cầu nối qua VPS (relay) + đục NAT nối thẳng | ✅ đã chạy thật qua Internet (relay trên VPS Hostinger, hole punch nối thẳng) |
+| **P2c** | Giao diện danh bạ relay (kiểu Radmin VPN): đăng nhập → chọn máy → xem/điều khiển | ✅ GUI đăng nhập tài khoản, danh bạ máy online, bấm kết nối (tự đục NAT, fallback relay) |
+| P3+ | H.265 phần cứng, tự chạy nền khi mở máy, nhiều màn hình | ⏳ |
 | P3 | Truyền file, dòng lệnh, nguồn | ⏳ |
 | P4 | Danh bạ, Tường màn hình, thao tác hàng loạt, nhật ký | ⏳ |
 | P5 | Kết nối qua Internet (NAT traversal), cài im lặng | ⏳ |

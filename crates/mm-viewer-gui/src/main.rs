@@ -1,21 +1,23 @@
-//! mm-viewer-gui — cửa sổ điều khiển máy từ xa (egui).
+//! mm-viewer-gui — cửa sổ điều khiển máy từ xa (egui), kiểu Radmin VPN.
 //!
-//! Màn hình kết nối: nhập địa chỉ máy con, cổng, mật khẩu → Kết nối.
-//! Sau khi nối: hiện màn hình máy kia theo thời gian thực; khi ở chế độ Điều
-//! khiển, chuột và bàn phím thật của bố được gửi sang máy kia.
+//! Đăng nhập tài khoản trên relay → thấy danh bạ máy online → bấm một máy là
+//! xem/điều khiển trực tiếp qua Internet (tự đục NAT nối thẳng, hỏng thì qua
+//! relay). Mã hoá đầu cuối.
 
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use mm_codec::{Decoder, EncodedFrame};
 use mm_proto::{
-    ClientMessage, FrameCodec, FrameHeader, InputEvent, MouseButton, ServerMessage, SessionMode,
-    PROTOCOL_VERSION,
+    ClientMessage, DeviceInfo, FrameCodec, FrameHeader, InputEvent, MouseButton, RelayMessage,
+    ServerMessage, SessionMode, PROTOCOL_VERSION,
 };
-use tokio::sync::mpsc::{unbounded_channel, UnboundedSender};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+const DEFAULT_RELAY: &str = "187.77.157.250:5000";
 
 struct FrameBuf {
     w: u32,
@@ -27,31 +29,33 @@ struct FrameBuf {
 struct Stats {
     fps: f32,
     kbps_frame: f32,
+    direct: bool,
 }
 
 #[derive(Default)]
 struct Shared {
     frame: Mutex<Option<FrameBuf>>,
     frame_id: AtomicU64,
-    connected: AtomicBool,
+    session_active: AtomicBool,
+    logged_in: AtomicBool,
     err: Mutex<Option<String>>,
+    status: Mutex<String>,
     title: Mutex<String>,
     stats: Mutex<Stats>,
+    devices: Mutex<Vec<DeviceInfo>>,
 }
 
-impl Shared {
-    fn reset(&self) {
-        *self.frame.lock().unwrap() = None;
-        self.frame_id.store(0, Ordering::SeqCst);
-        self.connected.store(false, Ordering::SeqCst);
-        *self.err.lock().unwrap() = None;
-        *self.title.lock().unwrap() = String::new();
-        *self.stats.lock().unwrap() = Stats::default();
-    }
+enum Cmd {
+    Connect {
+        device_id: String,
+        full: bool,
+        input_rx: UnboundedReceiver<InputEvent>,
+    },
 }
 
 enum Screen {
-    Connect,
+    Login,
+    Directory,
     Session,
 }
 
@@ -59,158 +63,311 @@ struct App {
     rt: tokio::runtime::Runtime,
     shared: Arc<Shared>,
     screen: Screen,
-    host: String,
-    port: String,
+    relay_addr: String,
+    account: String,
     password: String,
     name: String,
-    control_mode_full: bool,
+    cmd_tx: Option<UnboundedSender<Cmd>>,
     input_tx: Option<UnboundedSender<InputEvent>>,
     tex: Option<egui::TextureHandle>,
     last_frame_id: u64,
+    control_mode_full: bool,
+    current_device: String,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
-            rt: tokio::runtime::Runtime::new().expect("tạo runtime tokio"),
+            rt: tokio::runtime::Runtime::new().expect("runtime tokio"),
             shared: Arc::new(Shared::default()),
-            screen: Screen::Connect,
-            host: String::new(),
-            port: mm_proto::DEFAULT_PORT.to_string(),
+            screen: Screen::Login,
+            relay_addr: DEFAULT_RELAY.to_string(),
+            account: "halimi".to_string(),
             password: String::new(),
             name: "bố".to_string(),
-            control_mode_full: true,
+            cmd_tx: None,
             input_tx: None,
             tex: None,
             last_frame_id: 0,
+            control_mode_full: true,
+            current_device: String::new(),
         }
     }
 }
 
-impl App {
-    fn start_connect(&mut self, ctx: &egui::Context) {
-        let addr: std::net::SocketAddr = match format!("{}:{}", self.host.trim(), self.port.trim())
-            .parse()
-        {
-            Ok(a) => a,
-            Err(_) => {
-                *self.shared.err.lock().unwrap() =
-                    Some("Địa chỉ không hợp lệ (ví dụ 192.168.1.21)".into());
-                return;
-            }
-        };
-        self.shared.reset();
-        let (tx, mut rx) = unbounded_channel::<InputEvent>();
-        self.input_tx = Some(tx);
-        self.screen = Screen::Session;
-        self.tex = None;
-        self.last_frame_id = 0;
+// ---------------- khung hình vào bộ nhớ chung ----------------
 
-        let shared = self.shared.clone();
-        let ctx = ctx.clone();
-        let password = self.password.clone();
-        let name = self.name.clone();
-
-        self.rt.spawn(async move {
-            let res = async {
-                let ep = mm_quic::client_endpoint()?;
-                let mut sess = mm_quic::connect(&ep, addr, &password).await?;
-                sess.control
-                    .send(&ClientMessage::Hello {
-                        protocol_version: PROTOCOL_VERSION,
-                        viewer_name: name,
-                    })
-                    .await?;
-                if let ServerMessage::Welcome { host_name, .. } =
-                    sess.control.recv::<ServerMessage>().await?
-                {
-                    *shared.title.lock().unwrap() = host_name;
-                }
-                sess.control
-                    .send(&ClientMessage::SetMode(SessionMode::FullControl))
-                    .await?;
-                Ok::<_, anyhow::Error>((ep, sess.conn, sess.control))
-            }
-            .await;
-
-            match res {
-                Ok((ep, conn, mut control)) => {
-                    shared.connected.store(true, Ordering::SeqCst);
-                    ctx.request_repaint();
-                    let sh = shared.clone();
-                    let ctx2 = ctx.clone();
-                    tokio::spawn(async move { frame_loop(ep, conn, sh, ctx2).await });
-                    tokio::spawn(async move {
-                        while let Some(ev) = rx.recv().await {
-                            if control.send(&ClientMessage::Input(ev)).await.is_err() {
-                                break;
-                            }
-                        }
-                    });
-                }
-                Err(e) => {
-                    *shared.err.lock().unwrap() = Some(e.to_string());
-                    ctx.request_repaint();
-                }
-            }
-        });
+fn store_frame(shared: &Shared, dec: &mut Decoder, header: &FrameHeader, payload: &[u8]) {
+    if header.codec != FrameCodec::Tiled {
+        return;
+    }
+    if let Ok(ef) = mm_proto::decode::<EncodedFrame>(payload) {
+        if let Ok(fb) = dec.apply(&ef) {
+            *shared.frame.lock().unwrap() = Some(FrameBuf {
+                w: header.width,
+                h: header.height,
+                rgba: fb.to_vec(),
+            });
+            shared.frame_id.fetch_add(1, Ordering::SeqCst);
+        }
     }
 }
 
-async fn frame_loop(
-    _ep: quinn::Endpoint,
-    conn: quinn::Connection,
+struct Meter {
+    count: u64,
+    bytes: u64,
+    win_start: Instant,
+    win_count: u64,
+    direct: bool,
+}
+impl Meter {
+    fn new(direct: bool) -> Self {
+        Self { count: 0, bytes: 0, win_start: Instant::now(), win_count: 0, direct }
+    }
+    fn tick(&mut self, shared: &Shared, nbytes: usize) {
+        self.count += 1;
+        self.win_count += 1;
+        self.bytes += nbytes as u64;
+        let dt = self.win_start.elapsed().as_secs_f32();
+        if dt >= 0.5 {
+            *shared.stats.lock().unwrap() = Stats {
+                fps: self.win_count as f32 / dt,
+                kbps_frame: self.bytes as f32 / self.count.max(1) as f32 / 1024.0,
+                direct: self.direct,
+            };
+            self.win_start = Instant::now();
+            self.win_count = 0;
+        }
+    }
+}
+
+// ---------------- quản lý relay (một task nền) ----------------
+
+async fn relay_manager(
+    relay_addr: String,
+    account: String,
+    password: String,
+    name: String,
     shared: Arc<Shared>,
     ctx: egui::Context,
+    mut cmd_rx: UnboundedReceiver<Cmd>,
 ) {
-    let mut dec = Decoder::new();
-    let mut count: u64 = 0;
-    let mut bytes: u64 = 0;
-    let mut win_start = Instant::now();
-    let mut win_count: u64 = 0;
+    let set_err = |e: String| {
+        *shared.err.lock().unwrap() = Some(e);
+        ctx.request_repaint();
+    };
+    let addr: std::net::SocketAddr = match relay_addr.trim().parse() {
+        Ok(a) => a,
+        Err(_) => return set_err("Địa chỉ relay không hợp lệ".into()),
+    };
+    let endpoint = match mm_quic::dual_endpoint("0.0.0.0:0".parse().unwrap()) {
+        Ok(e) => e,
+        Err(e) => return set_err(format!("endpoint: {e}")),
+    };
+    let conn = match endpoint.connect(addr, "mm").and_then(|c| Ok(c)) {
+        Ok(connecting) => match connecting.await {
+            Ok(c) => c,
+            Err(e) => return set_err(format!("không nối được relay: {e}")),
+        },
+        Err(e) => return set_err(format!("relay: {e}")),
+    };
+    let (mut cs, mut cr) = match conn.open_bi().await {
+        Ok(v) => v,
+        Err(e) => return set_err(format!("relay: {e}")),
+    };
+    if relay_send(&mut cs, &RelayMessage::LoginViewer { account: account.clone() })
+        .await
+        .is_err()
+    {
+        return set_err("không gửi được đăng nhập".into());
+    }
+    match relay_recv(&mut cr).await {
+        Ok(RelayMessage::Devices(list)) => {
+            *shared.devices.lock().unwrap() = list;
+            shared.logged_in.store(true, Ordering::SeqCst);
+            *shared.status.lock().unwrap() = String::new();
+            ctx.request_repaint();
+        }
+        Ok(other) => return set_err(format!("relay trả lời lạ: {other:?}")),
+        Err(e) => return set_err(format!("relay: {e}")),
+    }
 
-    loop {
-        match mm_quic::recv_frame(&conn).await {
-            Ok((hb, payload)) => {
-                bytes += (hb.len() + payload.len()) as u64;
-                let header: FrameHeader = match mm_proto::decode(&hb) {
-                    Ok(h) => h,
-                    Err(_) => continue,
-                };
-                if header.codec == FrameCodec::Tiled {
-                    let ef: EncodedFrame = match mm_proto::decode(&payload) {
-                        Ok(e) => e,
-                        Err(_) => continue,
-                    };
-                    if let Ok(fb) = dec.apply(&ef) {
-                        *shared.frame.lock().unwrap() = Some(FrameBuf {
-                            w: header.width,
-                            h: header.height,
-                            rgba: fb.to_vec(),
-                        });
-                        shared.frame_id.fetch_add(1, Ordering::SeqCst);
-                    }
-                }
-                count += 1;
-                win_count += 1;
-                let dt = win_start.elapsed().as_secs_f32();
-                if dt >= 0.5 {
-                    let fps = win_count as f32 / dt;
-                    let kb = bytes as f32 / count.max(1) as f32 / 1024.0;
-                    *shared.stats.lock().unwrap() = Stats { fps, kbps_frame: kb };
-                    win_start = Instant::now();
-                    win_count = 0;
-                }
-                ctx.request_repaint();
-            }
-            Err(_) => {
-                shared.connected.store(false, Ordering::SeqCst);
-                ctx.request_repaint();
-                break;
+    while let Some(Cmd::Connect { device_id, full, input_rx }) = cmd_rx.recv().await {
+        shared.session_active.store(false, Ordering::SeqCst);
+        *shared.title.lock().unwrap() = String::new();
+        *shared.status.lock().unwrap() = format!("Đang nối tới {device_id}…");
+        ctx.request_repaint();
+        if let Err(e) = connect_device(
+            &endpoint, &conn, &mut cs, &mut cr, &device_id, full, &password, &name, &shared, &ctx,
+            input_rx,
+        )
+        .await
+        {
+            *shared.status.lock().unwrap() = format!("Lỗi: {e}");
+            ctx.request_repaint();
+        }
+        shared.session_active.store(false, Ordering::SeqCst);
+        ctx.request_repaint();
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_device(
+    endpoint: &quinn::Endpoint,
+    conn: &quinn::Connection,
+    cs: &mut quinn::SendStream,
+    cr: &mut quinn::RecvStream,
+    device_id: &str,
+    full: bool,
+    password: &str,
+    name: &str,
+    shared: &Arc<Shared>,
+    ctx: &egui::Context,
+    input_rx: UnboundedReceiver<InputEvent>,
+) -> anyhow::Result<()> {
+    relay_send(cs, &RelayMessage::ConnectTo { device_id: device_id.to_string() }).await?;
+    let (session, peer_addr) = match relay_recv(cr).await? {
+        RelayMessage::SessionReady { session, peer_addr } => (session, peer_addr),
+        RelayMessage::RelayError { message } => anyhow::bail!(message),
+        other => anyhow::bail!("chờ SessionReady, nhận {other:?}"),
+    };
+    let mode = if full { SessionMode::FullControl } else { SessionMode::ViewOnly };
+
+    // Thử đục NAT nối thẳng.
+    if let Ok(peer) = peer_addr.parse::<std::net::SocketAddr>() {
+        if let Ok(direct) = mm_quic::punch_connect(endpoint, peer, Duration::from_secs(5)).await {
+            if let Ok(csession) = mm_quic::client_auth(direct, password).await {
+                *shared.status.lock().unwrap() = "Nối thẳng (đục NAT)".into();
+                return drive_quic(csession, mode, name, shared.clone(), ctx.clone(), input_rx, true)
+                    .await;
             }
         }
     }
+
+    // Quay về chạy qua relay.
+    *shared.status.lock().unwrap() = "Qua relay".into();
+    let (mut send, recv) = conn.open_bi().await?;
+    mm_transport::write_frame(&mut send, &session.to_be_bytes()).await?;
+    let stream = tokio::io::join(recv, send);
+    drive_relay(stream, password, mode, name, shared.clone(), ctx.clone(), input_rx).await
 }
+
+/// Phiên trên kết nối QUIC trực tiếp (đã đục NAT).
+async fn drive_quic(
+    mut cs: mm_quic::ClientSession,
+    mode: SessionMode,
+    name: &str,
+    shared: Arc<Shared>,
+    ctx: egui::Context,
+    mut input_rx: UnboundedReceiver<InputEvent>,
+    direct: bool,
+) -> anyhow::Result<()> {
+    cs.control
+        .send(&ClientMessage::Hello { protocol_version: PROTOCOL_VERSION, viewer_name: name.into() })
+        .await?;
+    if let ServerMessage::Welcome { host_name, .. } = cs.control.recv::<ServerMessage>().await? {
+        *shared.title.lock().unwrap() = host_name;
+    }
+    cs.control.send(&ClientMessage::SetMode(mode)).await?;
+    shared.session_active.store(true, Ordering::SeqCst);
+    ctx.request_repaint();
+
+    let conn = cs.conn.clone();
+    let sh = shared.clone();
+    let c2 = ctx.clone();
+    let feeder = tokio::spawn(async move {
+        let mut dec = Decoder::new();
+        let mut meter = Meter::new(direct);
+        loop {
+            match mm_quic::recv_frame(&conn).await {
+                Ok((hb, payload)) => {
+                    if let Ok(h) = mm_proto::decode::<FrameHeader>(&hb) {
+                        store_frame(&sh, &mut dec, &h, &payload);
+                        meter.tick(&sh, hb.len() + payload.len());
+                        c2.request_repaint();
+                    }
+                }
+                Err(_) => break,
+            }
+        }
+    });
+
+    while let Some(ev) = input_rx.recv().await {
+        if cs.control.send(&ClientMessage::Input(ev)).await.is_err() {
+            break;
+        }
+    }
+    feeder.abort();
+    Ok(())
+}
+
+/// Phiên qua relay (bắc cầu byte, mã hoá Noise).
+async fn drive_relay<S>(
+    mut stream: S,
+    password: &str,
+    mode: SessionMode,
+    name: &str,
+    shared: Arc<Shared>,
+    ctx: egui::Context,
+    mut input_rx: UnboundedReceiver<InputEvent>,
+) -> anyhow::Result<()>
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
+{
+    let psk = mm_crypto::derive_psk(password)?;
+    let session = mm_transport::handshake_initiator(&mut stream, &psk).await?;
+    let (mut reader, mut writer) = mm_transport::secure_split(stream, session);
+
+    writer
+        .send(&ClientMessage::Hello { protocol_version: PROTOCOL_VERSION, viewer_name: name.into() })
+        .await?;
+    if let ServerMessage::Welcome { host_name, .. } = reader.recv::<ServerMessage>().await? {
+        *shared.title.lock().unwrap() = host_name;
+    }
+    writer.send(&ClientMessage::SetMode(mode)).await?;
+    shared.session_active.store(true, Ordering::SeqCst);
+    ctx.request_repaint();
+
+    let sh = shared.clone();
+    let c2 = ctx.clone();
+    let feeder = tokio::spawn(async move {
+        let mut dec = Decoder::new();
+        let mut meter = Meter::new(false);
+        let mut pending: Option<FrameHeader> = None;
+        loop {
+            match reader.recv::<ServerMessage>().await {
+                Ok(ServerMessage::FrameHeader(h)) => pending = Some(h),
+                Ok(ServerMessage::FrameData { bytes, .. }) => {
+                    if let Some(h) = pending.take() {
+                        store_frame(&sh, &mut dec, &h, &bytes);
+                        meter.tick(&sh, bytes.len());
+                        c2.request_repaint();
+                    }
+                }
+                Ok(_) => {}
+                Err(_) => break,
+            }
+        }
+    });
+
+    while let Some(ev) = input_rx.recv().await {
+        if writer.send(&ClientMessage::Input(ev)).await.is_err() {
+            break;
+        }
+    }
+    feeder.abort();
+    Ok(())
+}
+
+async fn relay_send(s: &mut quinn::SendStream, m: &RelayMessage) -> anyhow::Result<()> {
+    mm_transport::write_frame(s, &mm_proto::encode(m)?).await?;
+    Ok(())
+}
+async fn relay_recv(r: &mut quinn::RecvStream) -> anyhow::Result<RelayMessage> {
+    Ok(mm_proto::decode(&mm_transport::read_frame(r).await?)?)
+}
+
+// ---------------- input ----------------
 
 fn map_button(b: egui::PointerButton) -> Option<MouseButton> {
     match b {
@@ -237,83 +394,173 @@ fn map_key(k: egui::Key) -> Option<u32> {
     Some(vk)
 }
 
+// ---------------- giao diện ----------------
+
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
         match self.screen {
-            Screen::Connect => self.connect_ui(ctx),
+            Screen::Login => self.login_ui(ctx),
+            Screen::Directory => self.directory_ui(ctx),
             Screen::Session => self.session_ui(ctx),
         }
     }
 }
 
 impl App {
-    fn connect_ui(&mut self, ctx: &egui::Context) {
+    fn login_ui(&mut self, ctx: &egui::Context) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            ui.add_space(40.0);
+            ui.add_space(30.0);
             ui.vertical_centered(|ui| {
                 ui.heading("MinMin Remote");
-                ui.label("Điều khiển máy từ xa");
+                ui.label("Đăng nhập để thấy danh bạ máy");
             });
-            ui.add_space(24.0);
-            egui::Grid::new("form").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
-                ui.label("Địa chỉ máy con");
-                ui.text_edit_singleline(&mut self.host);
+            ui.add_space(20.0);
+            egui::Grid::new("login").num_columns(2).spacing([12.0, 10.0]).show(ui, |ui| {
+                ui.label("Máy chủ cầu nối");
+                ui.text_edit_singleline(&mut self.relay_addr);
                 ui.end_row();
-                ui.label("Cổng");
-                ui.text_edit_singleline(&mut self.port);
+                ui.label("Tài khoản");
+                ui.text_edit_singleline(&mut self.account);
                 ui.end_row();
-                ui.label("Mật khẩu");
+                ui.label("Mật khẩu máy");
                 ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
                 ui.end_row();
                 ui.label("Tên của bố");
                 ui.text_edit_singleline(&mut self.name);
                 ui.end_row();
             });
-            ui.add_space(16.0);
-            if ui.button("Kết nối").clicked() && !self.host.trim().is_empty() {
-                self.start_connect(ctx);
+            ui.add_space(14.0);
+            if ui.button("Đăng nhập").clicked() && !self.account.trim().is_empty() {
+                let (tx, rx) = unbounded_channel::<Cmd>();
+                self.cmd_tx = Some(tx);
+                *self.shared.err.lock().unwrap() = None;
+                *self.shared.status.lock().unwrap() = "Đang đăng nhập…".into();
+                self.shared.logged_in.store(false, Ordering::SeqCst);
+                let (relay, acc, pw, nm) = (
+                    self.relay_addr.clone(),
+                    self.account.clone(),
+                    self.password.clone(),
+                    self.name.clone(),
+                );
+                let shared = self.shared.clone();
+                let ctx2 = ctx.clone();
+                self.rt.spawn(relay_manager(relay, acc, pw, nm, shared, ctx2, rx));
+                self.screen = Screen::Directory;
             }
-            if let Some(err) = self.shared.err.lock().unwrap().clone() {
-                ui.add_space(12.0);
-                ui.colored_label(egui::Color32::from_rgb(0xE2, 0x4B, 0x4A), err);
+            if let Some(e) = self.shared.err.lock().unwrap().clone() {
+                ui.add_space(10.0);
+                ui.colored_label(egui::Color32::from_rgb(0xE2, 0x4B, 0x4A), e);
+            }
+        });
+    }
+
+    fn directory_ui(&mut self, ctx: &egui::Context) {
+        let logged = self.shared.logged_in.load(Ordering::SeqCst);
+        egui::TopBottomPanel::top("dirbar").show(ctx, |ui| {
+            ui.horizontal(|ui| {
+                ui.heading("Danh bạ máy");
+                ui.label(format!("[{}]", self.account));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Đăng xuất").clicked() {
+                        self.cmd_tx = None;
+                        self.shared.logged_in.store(false, Ordering::SeqCst);
+                        self.shared.devices.lock().unwrap().clear();
+                        self.screen = Screen::Login;
+                    }
+                    ui.checkbox(&mut self.control_mode_full, "Điều khiển");
+                });
+            });
+        });
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if !logged {
+                ui.add_space(20.0);
+                ui.vertical_centered(|ui| {
+                    ui.label(self.shared.status.lock().unwrap().clone());
+                    ui.spinner();
+                });
+                if let Some(e) = self.shared.err.lock().unwrap().clone() {
+                    ui.colored_label(egui::Color32::from_rgb(0xE2, 0x4B, 0x4A), e);
+                    if ui.button("Về đăng nhập").clicked() {
+                        self.screen = Screen::Login;
+                    }
+                }
+                ctx.request_repaint_after(Duration::from_millis(300));
+                return;
+            }
+            let devices = self.shared.devices.lock().unwrap().clone();
+            if devices.is_empty() {
+                ui.add_space(16.0);
+                ui.label("Chưa có máy nào online. Mở mm-server trên máy con rồi đăng nhập lại.");
+                return;
+            }
+            let mut to_connect: Option<String> = None;
+            egui::ScrollArea::vertical().show(ui, |ui| {
+                for d in &devices {
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        let color = if d.online {
+                            egui::Color32::from_rgb(0x1D, 0x9E, 0x75)
+                        } else {
+                            egui::Color32::GRAY
+                        };
+                        ui.colored_label(color, "●");
+                        ui.strong(&d.device_name);
+                        ui.weak(format!("({})", d.device_id));
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if d.online && ui.button("Kết nối").clicked() {
+                                to_connect = Some(d.device_id.clone());
+                            }
+                        });
+                    });
+                    ui.separator();
+                }
+            });
+            if let Some(device_id) = to_connect {
+                let (tx, rx) = unbounded_channel::<InputEvent>();
+                self.input_tx = Some(tx);
+                self.current_device = device_id.clone();
+                self.tex = None;
+                self.last_frame_id = 0;
+                *self.shared.frame.lock().unwrap() = None;
+                if let Some(cmd) = &self.cmd_tx {
+                    let _ = cmd.send(Cmd::Connect {
+                        device_id,
+                        full: self.control_mode_full,
+                        input_rx: rx,
+                    });
+                }
+                self.screen = Screen::Session;
             }
         });
     }
 
     fn session_ui(&mut self, ctx: &egui::Context) {
-        let connected = self.shared.connected.load(Ordering::SeqCst);
+        let active = self.shared.session_active.load(Ordering::SeqCst);
         let stats = *self.shared.stats.lock().unwrap();
         let title = self.shared.title.lock().unwrap().clone();
+        let status = self.shared.status.lock().unwrap().clone();
 
-        egui::TopBottomPanel::top("bar").show(ctx, |ui| {
+        egui::TopBottomPanel::top("sbar").show(ctx, |ui| {
             ui.horizontal(|ui| {
-                ui.label(format!("Máy: {}  {}:{}", title, self.host, self.port));
+                ui.strong(if title.is_empty() { self.current_device.clone() } else { title });
                 ui.separator();
-                ui.checkbox(&mut self.control_mode_full, "Điều khiển");
-                ui.separator();
-                ui.label(format!("{:.0} fps · {:.1} KB/khung", stats.fps, stats.kbps_frame));
+                let via = if stats.direct { "nối thẳng" } else { "relay" };
+                ui.label(format!("{:.0} fps · {:.1} KB · {}", stats.fps, stats.kbps_frame, via));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    if ui.button("Ngắt").clicked() {
-                        if let Some(tx) = &self.input_tx {
-                            let _ = tx; // input task tự dừng khi mất kết nối
-                        }
-                        self.input_tx = None;
-                        self.shared.connected.store(false, Ordering::SeqCst);
-                        self.screen = Screen::Connect;
+                    if ui.button("Về danh bạ").clicked() {
+                        self.input_tx = None; // đóng kênh input -> dừng phiên
+                        self.shared.session_active.store(false, Ordering::SeqCst);
+                        self.screen = Screen::Directory;
                     }
-                    if !connected {
-                        ui.colored_label(
-                            egui::Color32::from_rgb(0xBA, 0x75, 0x17),
-                            "đang kết nối…",
-                        );
+                    if active {
+                        ui.colored_label(egui::Color32::from_rgb(0x1D, 0x9E, 0x75), "● đang xem");
                     } else {
-                        ui.colored_label(egui::Color32::from_rgb(0x1D, 0x9E, 0x75), "● đã nối");
+                        ui.label(status.clone());
                     }
                 });
             });
         });
 
-        // Cập nhật texture nếu có khung mới.
         let fid = self.shared.frame_id.load(Ordering::SeqCst);
         if fid != self.last_frame_id {
             if let Some(fb) = self.shared.frame.lock().unwrap().as_ref() {
@@ -337,17 +584,15 @@ impl App {
                 let tsize = tex.size_vec2();
                 let avail = ui.available_size();
                 let scale = (avail.x / tsize.x).min(avail.y / tsize.y).min(4.0);
-                let draw = tsize * scale;
                 let (rect, _resp) =
-                    ui.allocate_exact_size(draw, egui::Sense::click_and_drag());
+                    ui.allocate_exact_size(tsize * scale, egui::Sense::click_and_drag());
                 ui.painter().image(
                     tex.id(),
                     rect,
                     egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                     egui::Color32::WHITE,
                 );
-
-                if connected && self.control_mode_full {
+                if active && self.control_mode_full {
                     if let Some(tx) = &self.input_tx {
                         let norm = |p: egui::Pos2| -> (f32, f32) {
                             (
@@ -362,9 +607,9 @@ impl App {
                                         let (x, y) = norm(*p);
                                         let _ = tx.send(InputEvent::MouseMove { x, y });
                                     }
-                                    egui::Event::PointerButton {
-                                        pos, button, pressed, ..
-                                    } if rect.contains(*pos) => {
+                                    egui::Event::PointerButton { pos, button, pressed, .. }
+                                        if rect.contains(*pos) =>
+                                    {
                                         if let Some(b) = map_button(*button) {
                                             let (x, y) = norm(*pos);
                                             let ev = if *pressed {
@@ -376,13 +621,7 @@ impl App {
                                         }
                                     }
                                     egui::Event::MouseWheel { delta, .. } => {
-                                        let d = if delta.y > 0.0 {
-                                            1
-                                        } else if delta.y < 0.0 {
-                                            -1
-                                        } else {
-                                            0
-                                        };
+                                        let d = if delta.y > 0.0 { 1 } else if delta.y < 0.0 { -1 } else { 0 };
                                         if d != 0 {
                                             let _ = tx.send(InputEvent::MouseWheel { delta: d });
                                         }
@@ -405,11 +644,10 @@ impl App {
                 }
             } else {
                 ui.centered_and_justified(|ui| {
-                    ui.label("Đang chờ khung hình đầu tiên…");
+                    ui.label(if status.is_empty() { "Đang kết nối…".into() } else { status });
                 });
             }
         });
-
         ctx.request_repaint();
     }
 }
@@ -419,9 +657,5 @@ fn main() -> eframe::Result<()> {
         viewport: egui::ViewportBuilder::default().with_inner_size([1100.0, 720.0]),
         ..Default::default()
     };
-    eframe::run_native(
-        "MinMin Remote",
-        options,
-        Box::new(|_cc| Ok(Box::<App>::default())),
-    )
+    eframe::run_native("MinMin Remote", options, Box::new(|_cc| Ok(Box::<App>::default())))
 }
