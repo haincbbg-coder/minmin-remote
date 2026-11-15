@@ -33,3 +33,21 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - name: Kiểm tra biên dịch + test phần cross-platform
         run: cargo test --release
+
+  linux-release:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Build release cho VPS Ubuntu
+        run: cargo build --release -p mm-relay -p mm-server -p mm-viewer
+      - name: Thu gom binary Linux
+        uses: actions/upload-artifact@v4
+        with:
+          name: mm-remote-linux
+          path: |
+            target/release/mm-relay
+            target/release/mm-server
+            target/release/mm-viewer
+            deploy/install-relay.sh
+            deploy/README.md
