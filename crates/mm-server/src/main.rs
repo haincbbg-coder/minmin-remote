@@ -184,14 +184,26 @@ async fn handle_conn_quic(mut session: mm_quic::ServerSession, args: Args) -> Re
         let monitor = monitor.clone();
         let mut control = session.control;
         tokio::spawn(async move {
+            let mut injector = mm_input::default_injector();
+            let mut allow_input = false;
             loop {
                 match control.recv::<ClientMessage>().await {
                     Ok(ClientMessage::Bye) | Err(_) => {
                         stop.store(true, Ordering::Relaxed);
                         break;
                     }
+                    Ok(ClientMessage::SetMode(mode)) => {
+                        allow_input = matches!(mode, SessionMode::FullControl);
+                    }
                     Ok(ClientMessage::SelectMonitor { index }) => {
                         monitor.store(index, Ordering::Relaxed);
+                    }
+                    Ok(ClientMessage::Input(ev)) => {
+                        if allow_input {
+                            if let Err(e) = injector.inject(&ev) {
+                                warn!("tiêm input lỗi: {e}");
+                            }
+                        }
                     }
                     Ok(_) => {}
                 }
@@ -301,16 +313,27 @@ async fn handle_conn(mut stream: TcpStream, psk: [u8; 32], args: Args) -> Result
         let stop = stop.clone();
         let monitor = monitor.clone();
         tokio::spawn(async move {
+            let mut injector = mm_input::default_injector();
+            let mut allow_input = false;
             loop {
                 match reader.recv::<ClientMessage>().await {
                     Ok(ClientMessage::Bye) | Err(_) => {
                         stop.store(true, Ordering::Relaxed);
                         break;
                     }
+                    Ok(ClientMessage::SetMode(mode)) => {
+                        allow_input = matches!(mode, SessionMode::FullControl);
+                    }
                     Ok(ClientMessage::SelectMonitor { index }) => {
                         monitor.store(index, Ordering::Relaxed);
                     }
-                    // Ack / RequestFullFrame / SetMode: P1 mọi khung đều là keyframe.
+                    Ok(ClientMessage::Input(ev)) => {
+                        if allow_input {
+                            if let Err(e) = injector.inject(&ev) {
+                                warn!("tiêm input lỗi: {e}");
+                            }
+                        }
+                    }
                     Ok(_) => {}
                 }
             }

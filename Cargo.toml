@@ -6,6 +6,7 @@ members = [
     "crates/mm-transport",
     "crates/mm-quic",
     "crates/mm-codec",
+    "crates/mm-input",
     "crates/mm-capture",
     "crates/mm-server",
     "crates/mm-viewer",
@@ -43,6 +44,7 @@ mm-crypto = { path = "crates/mm-crypto" }
 mm-transport = { path = "crates/mm-transport" }
 mm-quic = { path = "crates/mm-quic" }
 mm-codec = { path = "crates/mm-codec" }
+mm-input = { path = "crates/mm-input" }
 mm-capture = { path = "crates/mm-capture" }
 
 [profile.release]

@@ -40,6 +40,23 @@ struct Args {
     /// Transport: quic (v2, khuyên dùng) hoặc tcp (P1).
     #[arg(long, default_value = "quic")]
     transport: String,
+    /// Gửi một chuỗi chuột/bàn phím thử (bật chế độ FullControl) để kiểm chứng điều khiển.
+    #[arg(long, default_value_t = false)]
+    demo_input: bool,
+}
+
+/// Chuỗi input mẫu: ra giữa màn hình, click trái, gõ phím A, cuộn chuột.
+fn demo_sequence() -> Vec<mm_proto::InputEvent> {
+    use mm_proto::{InputEvent::*, MouseButton::Left};
+    vec![
+        MouseMove { x: 0.5, y: 0.5 },
+        MouseDown { button: Left, x: 0.5, y: 0.5 },
+        MouseUp { button: Left, x: 0.5, y: 0.5 },
+        KeyDown { vk: 0x41 }, // 'A'
+        KeyUp { vk: 0x41 },
+        MouseWheel { delta: -1 },
+        MouseMove { x: 0.9, y: 0.1 },
+    ]
 }
 
 /// Giải mã payload một khung và lưu PNG nếu cần. Trả về true nếu là keyframe.
@@ -115,7 +132,14 @@ async fn run_quic(args: Args) -> Result<()> {
         ServerMessage::Error { message } => return Err(anyhow!("server báo lỗi: {message}")),
         _ => return Err(anyhow!("chờ Welcome nhưng nhận gói khác")),
     }
-    session.control.send(&ClientMessage::SetMode(SessionMode::ViewOnly)).await?;
+    let mode = if args.demo_input { SessionMode::FullControl } else { SessionMode::ViewOnly };
+    session.control.send(&ClientMessage::SetMode(mode)).await?;
+    if args.demo_input {
+        for ev in demo_sequence() {
+            session.control.send(&ClientMessage::Input(ev)).await?;
+        }
+        info!("đã gửi {} sự kiện input thử", demo_sequence().len());
+    }
 
     let start = Instant::now();
     let mut received = 0u64;

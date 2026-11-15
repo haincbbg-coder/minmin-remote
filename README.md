@@ -34,7 +34,8 @@ Giảm ~8 lần băng thông. Trên mạng yếu, đây là khác biệt giữa 
 | P0 | Thiết kế + giao thức | ✅ |
 | P1 | Xem màn hình + mã hoá + mật khẩu | ✅ |
 | **v2** | Codec dirty-rect + transport QUIC | ✅ lõi xong, đã kiểm thử |
-| P2 | Điều khiển chuột/bàn phím, nhiều màn hình, **H.264 phần cứng** | ⏳ |
+| **P2a** | **Điều khiển chuột/bàn phím** (SendInput) | ✅ đã kiểm thử; đường truyền e2e chạy, SendInput thật cho Windows |
+| P2b | Chụp màn hình thật (DXGI/GDI) + **H.265 phần cứng** | ⏳ |
 | P3 | Truyền file, dòng lệnh, nguồn | ⏳ |
 | P4 | Danh bạ, Tường màn hình, thao tác hàng loạt, nhật ký | ⏳ |
 | P5 | Kết nối qua Internet (NAT traversal), cài im lặng | ⏳ |
@@ -48,6 +49,7 @@ crates/
   mm-transport  Đóng khung + chia nhỏ gói (đường TCP)            ✅ test
   mm-quic       Transport QUIC: control + video uni-stream       ✅ test
   mm-codec      Codec dirty-rect (chỉ gửi ô thay đổi)            ✅ test
+  mm-input      Tiêm chuột/bàn phím: Mock + SendInput (Windows)  ✅ test
   mm-capture    Chụp màn hình: Mock (mọi HĐH) + DXGI (Windows)   ✅ test
   mm-server     Máy bị điều khiển — chạy nền, không giao diện
   mm-viewer     Người điều khiển — bản CLI (Tauri GUI ở P2)

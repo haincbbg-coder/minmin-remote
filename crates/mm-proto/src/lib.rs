@@ -23,6 +23,8 @@ pub enum ClientMessage {
     },
     /// Chọn chế độ làm việc. P1 chỉ hỗ trợ ViewOnly.
     SetMode(SessionMode),
+    /// Sự kiện chuột/bàn phím (chỉ áp dụng ở chế độ FullControl).
+    Input(InputEvent),
     /// Yêu cầu Server gửi một khung hình đầy đủ (keyframe) ngay.
     RequestFullFrame,
     /// Báo cho Server biết Viewer đã nhận khung tới số thứ tự này (điều tiết tốc độ).
@@ -55,6 +57,32 @@ pub enum ServerMessage {
     Error { message: String },
     /// Server chủ động đóng phiên.
     Closed { reason: String },
+}
+
+/// Nút chuột.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
+/// Sự kiện nhập liệu từ người điều khiển. Toạ độ chuột chuẩn hoá 0.0..1.0 theo
+/// màn hình đang xem, để không phụ thuộc độ phân giải hai máy.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum InputEvent {
+    /// Di chuyển chuột tới toạ độ chuẩn hoá (x, y).
+    MouseMove { x: f32, y: f32 },
+    /// Nhấn giữ một nút chuột tại (x, y).
+    MouseDown { button: MouseButton, x: f32, y: f32 },
+    /// Nhả một nút chuột tại (x, y).
+    MouseUp { button: MouseButton, x: f32, y: f32 },
+    /// Lăn chuột; delta > 0 là lăn lên.
+    MouseWheel { delta: i32 },
+    /// Nhấn phím (mã phím ảo Windows VK_*).
+    KeyDown { vk: u32 },
+    /// Nhả phím.
+    KeyUp { vk: u32 },
 }
 
 /// Chế độ phiên làm việc, ánh xạ sang các chế độ của Radmin.

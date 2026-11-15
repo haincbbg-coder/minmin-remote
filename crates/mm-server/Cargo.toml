@@ -16,6 +16,7 @@ mm-transport.workspace = true
 mm-quic.workspace = true
 mm-capture.workspace = true
 mm-codec.workspace = true
+mm-input.workspace = true
 anyhow.workspace = true
 clap.workspace = true
 tracing.workspace = true
