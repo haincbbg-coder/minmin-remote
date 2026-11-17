@@ -99,7 +99,7 @@ struct App {
     input_tx: Option<UnboundedSender<InputEvent>>,
     tex: Option<egui::TextureHandle>,
     last_frame_id: u64,
-    control_mode_full: bool,
+    session_full: bool,
     current_device: String,
 }
 
@@ -117,7 +117,7 @@ impl Default for App {
             input_tx: None,
             tex: None,
             last_frame_id: 0,
-            control_mode_full: true,
+            session_full: true,
             current_device: String::new(),
         }
     }
@@ -714,8 +714,6 @@ impl App {
                         self.shared.devices.lock().unwrap().clear();
                         self.screen = Screen::Login;
                     }
-                    ui.add_space(4.0);
-                    ui.checkbox(&mut self.control_mode_full, "Điều khiển");
                 });
             });
         });
@@ -754,6 +752,11 @@ impl App {
                         .color(MUTED),
                 );
             });
+            ui.label(
+                RichText::new("Bấm = điều khiển · chuột phải để chọn Chỉ xem / Điều khiển")
+                    .size(11.5)
+                    .color(mix(MUTED, BG, 0.25)),
+            );
             ui.add_space(10.0);
 
             if devices.is_empty() {
@@ -777,38 +780,35 @@ impl App {
                 let t = ui.input(|i| i.time);
                 0.5 + 0.5 * ((t * 2.2).sin() as f32)
             };
-            let mut to_connect: Option<String> = None;
+            let mut to_connect: Option<(String, bool)> = None;
             egui::ScrollArea::vertical().show(ui, |ui| {
                 for d in &devices {
-                    if self.device_card(ui, d, pulse) {
-                        to_connect = Some(d.device_id.clone());
+                    if let Some(full) = self.device_card(ui, d, pulse) {
+                        to_connect = Some((d.device_id.clone(), full));
                     }
                     ui.add_space(8.0);
                 }
             });
             ctx.request_repaint_after(Duration::from_millis(33));
 
-            if let Some(device_id) = to_connect {
+            if let Some((device_id, full)) = to_connect {
                 let (tx, rx) = unbounded_channel::<InputEvent>();
                 self.input_tx = Some(tx);
+                self.session_full = full;
                 self.current_device = device_id.clone();
                 self.tex = None;
                 self.last_frame_id = 0;
                 *self.shared.frame.lock().unwrap() = None;
                 if let Some(cmd) = &self.cmd_tx {
-                    let _ = cmd.send(Cmd::Connect {
-                        device_id,
-                        full: self.control_mode_full,
-                        input_rx: rx,
-                    });
+                    let _ = cmd.send(Cmd::Connect { device_id, full, input_rx: rx });
                 }
                 self.screen = Screen::Session;
             }
         });
     }
 
-    /// Vẽ một thẻ máy; trả về true nếu được bấm để kết nối.
-    fn device_card(&self, ui: &mut egui::Ui, d: &DeviceInfo, pulse: f32) -> bool {
+    /// Vẽ một thẻ máy. Trả về Some(true)=điều khiển, Some(false)=chỉ xem.
+    fn device_card(&self, ui: &mut egui::Ui, d: &DeviceInfo, pulse: f32) -> Option<bool> {
         let w = ui.available_width();
         let sense = if d.online { Sense::click() } else { Sense::hover() };
         let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 66.0), sense);
@@ -879,10 +879,30 @@ impl App {
             );
         }
 
-        if d.online {
-            resp.clone().on_hover_cursor(CursorIcon::PointingHand);
+        if !d.online {
+            return None;
         }
-        resp.clicked() && d.online
+        // Bấm trái = điều khiển hoàn toàn (mặc định, như double-click Radmin).
+        let mut choice: Option<bool> = None;
+        if resp.clicked() {
+            choice = Some(true);
+        }
+        // Chuột phải = menu chọn, kiểu Radmin.
+        let resp = resp.on_hover_cursor(CursorIcon::PointingHand);
+        resp.context_menu(|ui| {
+            ui.set_min_width(190.0);
+            ui.label(sb(&d.device_name).size(13.0).color(MUTED));
+            ui.separator();
+            if ui.button(sb("🖱  Điều khiển hoàn toàn")).clicked() {
+                choice = Some(true);
+                ui.close_menu();
+            }
+            if ui.button(sb("👁  Chỉ xem")).clicked() {
+                choice = Some(false);
+                ui.close_menu();
+            }
+        });
+        choice
     }
 
     fn session_ui(&mut self, ctx: &egui::Context) {
@@ -908,6 +928,11 @@ impl App {
                         .size(15.0)
                         .color(TEXT),
                 );
+                if self.session_full {
+                    ui.label(RichText::new("· 🖱 Điều khiển").size(12.5).color(MUTED));
+                } else {
+                    ui.label(RichText::new("· 👁 Chỉ xem").size(12.5).color(AMBER));
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if active {
@@ -971,7 +996,7 @@ impl App {
                         egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
                         Color32::WHITE,
                     );
-                    if active && self.control_mode_full {
+                    if active && self.session_full {
                         if let Some(tx) = &self.input_tx {
                             let norm = |p: egui::Pos2| -> (f32, f32) {
                                 (
