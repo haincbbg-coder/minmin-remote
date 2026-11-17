@@ -1,0 +1,4 @@
+# Trên Windows: nhúng tĩnh thư viện C runtime (VCRUNTIME140.dll...) vào .exe
+# => chạy được trên MỌI máy Windows, không cần cài Visual C++ Redistributable.
+[target.x86_64-pc-windows-msvc]
+rustflags = ["-C", "target-feature=+crt-static"]
