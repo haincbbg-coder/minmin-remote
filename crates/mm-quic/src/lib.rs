@@ -30,6 +30,17 @@ fn ensure_provider() {
     });
 }
 
+/// Cấu hình giữ kết nối: ping ngầm mỗi 5s để không bị NAT/QUIC ngắt khi màn hình
+/// đứng yên (không có khung hình nào gửi đi); bỏ cuộc nếu 30s không phản hồi.
+fn transport() -> Arc<quinn::TransportConfig> {
+    let mut t = quinn::TransportConfig::default();
+    t.keep_alive_interval(Some(std::time::Duration::from_secs(5)));
+    t.max_idle_timeout(Some(
+        quinn::IdleTimeout::try_from(std::time::Duration::from_secs(30)).unwrap(),
+    ));
+    Arc::new(t)
+}
+
 /// Dẫn xuất đáp án cho challenge từ mật khẩu: Blake2s(key || challenge).
 fn auth_response(password: &str, challenge: &[u8]) -> Result<[u8; 32]> {
     use blake2::{Blake2s256, Digest};
@@ -53,7 +64,9 @@ fn server_crypto() -> Result<quinn::ServerConfig> {
         .with_single_cert(vec![cert_der], key_der)?;
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let qsc = quinn::crypto::rustls::QuicServerConfig::try_from(tls)?;
-    Ok(quinn::ServerConfig::with_crypto(Arc::new(qsc)))
+    let mut sc = quinn::ServerConfig::with_crypto(Arc::new(qsc));
+    sc.transport_config(transport());
+    Ok(sc)
 }
 
 fn client_cfg() -> Result<quinn::ClientConfig> {
@@ -65,7 +78,9 @@ fn client_cfg() -> Result<quinn::ClientConfig> {
         .with_no_client_auth();
     tls.alpn_protocols = vec![ALPN.to_vec()];
     let qcc = quinn::crypto::rustls::QuicClientConfig::try_from(tls)?;
-    Ok(quinn::ClientConfig::new(Arc::new(qcc)))
+    let mut cc = quinn::ClientConfig::new(Arc::new(qcc));
+    cc.transport_config(transport());
+    Ok(cc)
 }
 
 /// Mở endpoint QUIC phía Server với cert tự ký.
