@@ -465,8 +465,20 @@ fn map_key(k: egui::Key) -> Option<u32> {
         Num0 => 0x30, Num1 => 0x31, Num2 => 0x32, Num3 => 0x33, Num4 => 0x34,
         Num5 => 0x35, Num6 => 0x36, Num7 => 0x37, Num8 => 0x38, Num9 => 0x39,
         Space => 0x20, Enter => 0x0D, Backspace => 0x08, Tab => 0x09, Escape => 0x1B,
-        Delete => 0x2E, ArrowLeft => 0x25, ArrowUp => 0x26, ArrowRight => 0x27, ArrowDown => 0x28,
-        Home => 0x24, End => 0x23, _ => return None,
+        Delete => 0x2E, Insert => 0x2D, Home => 0x24, End => 0x23, PageUp => 0x21, PageDown => 0x22,
+        ArrowLeft => 0x25, ArrowUp => 0x26, ArrowRight => 0x27, ArrowDown => 0x28,
+        // Phím chức năng F1..F24
+        F1 => 0x70, F2 => 0x71, F3 => 0x72, F4 => 0x73, F5 => 0x74, F6 => 0x75,
+        F7 => 0x76, F8 => 0x77, F9 => 0x78, F10 => 0x79, F11 => 0x7A, F12 => 0x7B,
+        F13 => 0x7C, F14 => 0x7D, F15 => 0x7E, F16 => 0x7F, F17 => 0x80, F18 => 0x81,
+        F19 => 0x82, F20 => 0x83, F21 => 0x84, F22 => 0x85, F23 => 0x86, F24 => 0x87,
+        // Dấu câu (bố cục US)
+        Minus => 0xBD, Plus | Equals => 0xBB, Comma => 0xBC, Period => 0xBE,
+        Slash | Questionmark => 0xBF, Semicolon | Colon => 0xBA, Quote => 0xDE,
+        OpenBracket => 0xDB, CloseBracket => 0xDD, Backslash | Pipe => 0xDC, Backtick => 0xC0,
+        // Lệnh copy/cut/paste (phòng khi egui phát ra dạng lệnh)
+        Copy => 0x43, Paste => 0x56, Cut => 0x58,
+        _ => return None,
     };
     Some(vk)
 }
@@ -883,6 +895,13 @@ impl App {
         egui::TopBottomPanel::top("menubar").frame(menuframe).show(ctx, |ui| {
             egui::menu::bar(ui, |ui| {
                 ui.menu_button(sb("Hệ thống"), |ui| {
+                    if ui.button("➕  Cửa sổ mới (xem máy khác)").clicked() {
+                        if let Ok(exe) = std::env::current_exe() {
+                            let _ = std::process::Command::new(exe).spawn();
+                        }
+                        ui.close_menu();
+                    }
+                    ui.separator();
                     if ui.button("Đăng xuất").clicked() {
                         do_logout = true;
                         ui.close_menu();
