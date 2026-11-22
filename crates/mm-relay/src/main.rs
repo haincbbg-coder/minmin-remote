@@ -68,6 +68,14 @@ impl State {
                 device_id: id.clone(),
                 device_name: d.name.clone(),
                 online: true,
+                // chỉ lấy phần IP (bỏ cổng) cho gọn, kiểu Radmin
+                addr: d
+                    .public_addr
+                    .rsplit_once(':')
+                    .map(|(ip, _)| ip)
+                    .unwrap_or(&d.public_addr)
+                    .trim_matches(|c| c == '[' || c == ']')
+                    .to_string(),
             })
             .collect()
     }

@@ -7,6 +7,10 @@
 //! Chạy hoàn toàn ẩn: không icon, không thông báo — đúng yêu cầu điều khiển
 //! máy ảo và server nội bộ của bố.
 
+// Trên Windows: app dạng "windows" (không console) -> KHÔNG bao giờ hiện cửa sổ
+// CMD, kể cả khi khởi động cùng máy. Logs bị bỏ (chạy nền).
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
