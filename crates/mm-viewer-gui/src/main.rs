@@ -50,6 +50,33 @@ fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     Color32::from_rgb(f(a.r(), b.r()), f(a.g(), b.g()), f(a.b(), b.b()))
 }
 
+// ---- nhớ đăng nhập (lưu ra file để lần sau tự kết nối) ----
+fn config_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
+    Some(std::path::Path::new(&base).join("MinMinRemote").join("viewer.cfg"))
+}
+/// Trả về (relay, account, password, name).
+fn load_config() -> Option<(String, String, String, String)> {
+    let s = std::fs::read_to_string(config_path()?).ok()?;
+    let mut it = s.lines();
+    let relay = it.next()?.to_string();
+    let account = it.next()?.to_string();
+    let password = it.next().unwrap_or("").to_string();
+    let name = it.next().unwrap_or("bố").to_string();
+    Some((relay, account, password, name))
+}
+fn save_config(relay: &str, account: &str, password: &str, name: &str) {
+    if let Some(p) = config_path() {
+        if let Some(dir) = p.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        let _ = std::fs::write(p, format!("{relay}\n{account}\n{password}\n{name}\n"));
+    }
+}
+
+const WIN_NARROW: [f32; 2] = [380.0, 640.0];
+const WIN_WIDE: [f32; 2] = [1160.0, 760.0];
+
 struct FrameBuf {
     w: u32,
     h: u32,
@@ -104,24 +131,34 @@ struct App {
     last_frame_id: u64,
     session_full: bool,
     current_device: String,
+    auto_login: bool,
 }
 
 impl Default for App {
     fn default() -> Self {
+        // Đọc cấu hình đã lưu -> lần sau tự kết nối, khỏi gõ lại.
+        let (relay, account, password, name, auto) = match load_config() {
+            Some((r, a, p, n)) => {
+                let auto = !p.is_empty();
+                (r, a, p, n, auto)
+            }
+            None => (DEFAULT_RELAY.to_string(), "halimi".to_string(), String::new(), "bố".to_string(), false),
+        };
         Self {
             rt: tokio::runtime::Runtime::new().expect("runtime tokio"),
             shared: Arc::new(Shared::default()),
             screen: Screen::Login,
-            relay_addr: DEFAULT_RELAY.to_string(),
-            account: "halimi".to_string(),
-            password: String::new(),
-            name: "bố".to_string(),
+            relay_addr: relay,
+            account,
+            password,
+            name,
             cmd_tx: None,
             input_tx: None,
             tex: None,
             last_frame_id: 0,
             session_full: true,
             current_device: String::new(),
+            auto_login: auto,
         }
     }
 }
@@ -534,14 +571,13 @@ fn device_row(ui: &mut egui::Ui, d: &DeviceInfo, idx: usize, pulse: f32) -> Opti
         FontId::new(14.0, sbfam()),
         if d.online { TEXT } else { MUTED },
     );
-    // IP (bên phải)
-    let ipt = if d.addr.is_empty() { d.device_id.clone() } else { d.addr.clone() };
+    // trạng thái bên phải
     p.text(
         egui::pos2(rect.right() - 14.0, rect.center().y),
         Align2::RIGHT_CENTER,
-        ipt,
-        FontId::new(12.5, FontFamily::Proportional),
-        if d.online { mix(TEXT, MUTED, 0.45) } else { MUTED },
+        if d.online { "● trực tuyến" } else { "ngoại tuyến" },
+        FontId::new(11.5, FontFamily::Proportional),
+        if d.online { mix(GREEN, MUTED, 0.2) } else { MUTED },
     );
     // kẻ mảnh dưới dòng
     p.line_segment(
@@ -560,9 +596,6 @@ fn device_row(ui: &mut egui::Ui, d: &DeviceInfo, idx: usize, pulse: f32) -> Opti
     resp.context_menu(|ui| {
         ui.set_min_width(210.0);
         ui.label(sb(&d.device_name).size(13.5).color(TEXT));
-        if !d.addr.is_empty() {
-            ui.label(RichText::new(&d.addr).size(11.5).color(MUTED));
-        }
         ui.separator();
         if ui.button(sb("🖱  Điều khiển hoàn toàn")).clicked() {
             choice = Some(true);
@@ -573,10 +606,6 @@ fn device_row(ui: &mut egui::Ui, d: &DeviceInfo, idx: usize, pulse: f32) -> Opti
             ui.close_menu();
         }
         ui.separator();
-        if ui.button("Sao chép địa chỉ IP").clicked() {
-            ui.output_mut(|o| o.copied_text = d.addr.clone());
-            ui.close_menu();
-        }
         ui.add_enabled(false, egui::Button::new(RichText::new("Truyền tệp (sắp có)").color(MUTED)));
         ui.add_enabled(false, egui::Button::new(RichText::new("Nhắn tin (sắp có)").color(MUTED)));
     });
@@ -722,6 +751,13 @@ fn app_icon() -> egui::IconData {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        // Lần mở đầu: nếu đã lưu mật khẩu -> tự kết nối luôn (như Radmin VPN).
+        if self.auto_login {
+            self.auto_login = false;
+            if !self.password.trim().is_empty() && !self.account.trim().is_empty() {
+                self.start_login(ctx);
+            }
+        }
         match self.screen {
             Screen::Login => self.login_ui(ctx),
             Screen::Directory => self.directory_ui(ctx),
@@ -735,16 +771,16 @@ impl App {
         let frame = egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(18.0));
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             let avail_h = ui.available_height();
-            ui.add_space((avail_h * 0.10).min(70.0));
+            ui.add_space((avail_h * 0.06).min(40.0));
             ui.vertical_centered(|ui| {
-                ui.set_max_width(400.0);
+                ui.set_max_width(320.0);
                 let card = egui::Frame::none()
                     .fill(CARD)
                     .rounding(Rounding::same(16.0))
                     .stroke(Stroke::new(1.0, BORDER))
-                    .inner_margin(egui::Margin::same(26.0));
+                    .inner_margin(egui::Margin::same(20.0));
                 card.show(ui, |ui| {
-                    ui.set_width(340.0);
+                    ui.set_width(276.0);
                     ui.vertical_centered(|ui| {
                         paint_badge(ui, 56.0);
                         ui.add_space(12.0);
@@ -796,6 +832,8 @@ impl App {
     }
 
     fn start_login(&mut self, ctx: &egui::Context) {
+        // nhớ cho lần sau
+        save_config(&self.relay_addr, &self.account, &self.password, &self.name);
         let (tx, rx) = unbounded_channel::<Cmd>();
         self.cmd_tx = Some(tx);
         *self.shared.err.lock().unwrap() = None;
@@ -974,6 +1012,9 @@ impl App {
             if let Some(cmd) = &self.cmd_tx {
                 let _ = cmd.send(Cmd::Connect { device_id, full, input_rx: rx });
             }
+            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                WIN_WIDE[0], WIN_WIDE[1],
+            )));
             self.screen = Screen::Session;
         }
     }
@@ -1000,6 +1041,10 @@ impl App {
                 if ui.button(sb("←  Danh bạ")).clicked() {
                     self.input_tx = None; // đóng kênh input -> dừng phiên
                     self.shared.session_active.store(false, Ordering::SeqCst);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
+                        WIN_NARROW[0],
+                        WIN_NARROW[1],
+                    )));
                     self.screen = Screen::Directory;
                 }
                 ui.add_space(6.0);
@@ -1162,8 +1207,8 @@ impl App {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1120.0, 720.0])
-            .with_min_inner_size([760.0, 520.0])
+            .with_inner_size(WIN_NARROW)
+            .with_min_inner_size([340.0, 460.0])
             .with_title("MinMin Remote")
             .with_icon(app_icon()),
         ..Default::default()

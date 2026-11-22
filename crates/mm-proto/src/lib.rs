@@ -138,9 +138,6 @@ pub struct DeviceInfo {
     pub device_id: String,
     pub device_name: String,
     pub online: bool,
-    /// Địa chỉ IP công khai (relay thấy), hiển thị trong danh bạ kiểu Radmin.
-    #[serde(default)]
-    pub addr: String,
 }
 
 /// Gói tin giữa client (máy con / viewer) và máy chủ cầu nối (mm-relay).
