@@ -30,6 +30,14 @@ jobs:
         with:
           name: mm-remote-windows
           path: dist/*
+      - name: Phát hành Release (tải trực tiếp)
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          Compress-Archive -Path dist\* -DestinationPath mm-remote-windows.zip -Force
+          gh release delete latest --cleanup-tag --yes
+          gh release create latest mm-remote-windows.zip --title "MinMin Remote - ban moi nhat" --notes "Build tu dong tu commit ${{ github.sha }}"
 
   linux-check:
     runs-on: ubuntu-latest
