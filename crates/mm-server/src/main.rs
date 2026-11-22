@@ -96,14 +96,40 @@ fn encode_frame(
     ))
 }
 
+/// Ghi log ra file cạnh exe (mm-server.log) vì app chạy nền không có cửa sổ.
+/// Nhờ vậy khi tự chạy mà không online, mở file này ra là biết lý do.
+fn init_logging() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "info".into());
+    let log_path = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join("mm-server.log")));
+    match log_path {
+        Some(lp) => {
+            // xoá log cũ mỗi lần chạy để khỏi phình to
+            let _ = std::fs::OpenOptions::new().create(true).write(true).truncate(true).open(&lp);
+            let lp2 = lp.clone();
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(move || -> Box<dyn std::io::Write> {
+                    match std::fs::OpenOptions::new().create(true).append(true).open(&lp2) {
+                        Ok(f) => Box::new(f),
+                        Err(_) => Box::new(std::io::sink()),
+                    }
+                })
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "info".into()),
-        )
-        .init();
+    init_logging();
+    info!("mm-server khởi động (pid {})", std::process::id());
 
     let args = Args::parse();
     if args.relay.is_some() {
