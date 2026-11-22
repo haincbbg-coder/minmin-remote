@@ -75,7 +75,6 @@ fn save_config(relay: &str, account: &str, password: &str, name: &str) {
 }
 
 const WIN_NARROW: [f32; 2] = [380.0, 640.0];
-const WIN_WIDE: [f32; 2] = [1160.0, 760.0];
 
 struct FrameBuf {
     w: u32,
@@ -1012,9 +1011,7 @@ impl App {
             if let Some(cmd) = &self.cmd_tx {
                 let _ = cmd.send(Cmd::Connect { device_id, full, input_rx: rx });
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                WIN_WIDE[0], WIN_WIDE[1],
-            )));
+            ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(true));
             self.screen = Screen::Session;
         }
     }
@@ -1041,6 +1038,7 @@ impl App {
                 if ui.button(sb("←  Danh bạ")).clicked() {
                     self.input_tx = None; // đóng kênh input -> dừng phiên
                     self.shared.session_active.store(false, Ordering::SeqCst);
+                    ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
                         WIN_NARROW[0],
                         WIN_NARROW[1],

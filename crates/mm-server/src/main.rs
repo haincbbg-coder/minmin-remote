@@ -40,8 +40,8 @@ struct Args {
     /// Số khung hình mỗi giây.
     #[arg(long, default_value_t = 15)]
     fps: u32,
-    /// Chất lượng JPEG (1..=100).
-    #[arg(long, default_value_t = 70)]
+    /// Chất lượng JPEG (1..=100). Cao = nét hơn, tốn băng thông hơn.
+    #[arg(long, default_value_t = 85)]
     quality: u8,
     /// (Cũ, không cần nữa) ép quay màn hình thật. Windows nay mặc định đã bật.
     #[arg(long, default_value_t = false)]
