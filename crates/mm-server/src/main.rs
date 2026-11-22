@@ -107,7 +107,25 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
     if args.relay.is_some() {
-        run_relay(args).await
+        // Chạy nền bền bỉ: lặp vô hạn, cứ rớt là tự nối lại sau vài giây.
+        // Nhờ vậy máy con sống sót qua: khởi động lại máy (mạng chưa kịp lên),
+        // mạng chập chờn, và relay khởi động lại — luôn tự quay lại online.
+        let mut wait = 3u64;
+        loop {
+            match run_relay(args.clone()).await {
+                // đã từng nối được rồi mới rớt -> nối lại nhanh
+                Ok(()) => {
+                    warn!("mất kết nối relay, thử nối lại…");
+                    wait = 3;
+                }
+                // chưa nối được (mạng chưa lên / relay sập) -> giãn dần tới 15s
+                Err(e) => {
+                    warn!("chưa nối được relay: {e}; thử lại…");
+                    wait = (wait + 2).min(15);
+                }
+            }
+            tokio::time::sleep(Duration::from_secs(wait)).await;
+        }
     } else if args.transport == "tcp" {
         run_tcp(args).await
     } else {
