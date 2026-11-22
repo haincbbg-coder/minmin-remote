@@ -55,6 +55,23 @@ fn config_path() -> Option<std::path::PathBuf> {
     let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
     Some(std::path::Path::new(&base).join("MinMinRemote").join("viewer.cfg"))
 }
+
+fn log_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("APPDATA").or_else(|| std::env::var_os("HOME"))?;
+    let dir = std::path::Path::new(&base).join("MinMinRemote");
+    let _ = std::fs::create_dir_all(&dir);
+    Some(dir.join("viewer.log"))
+}
+
+/// Ghi 1 dòng chẩn đoán (để soi lỗi bàn phím). Không chạy trong hook.
+fn dbglog(msg: &str) {
+    use std::io::Write;
+    if let Some(p) = log_path() {
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+            let _ = writeln!(f, "{msg}");
+        }
+    }
+}
 /// Trả về (relay, account, password, name).
 fn load_config() -> Option<(String, String, String, String)> {
     let s = std::fs::read_to_string(config_path()?).ok()?;
@@ -84,19 +101,32 @@ static KB_QUEUE: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
 
 #[cfg(windows)]
 mod kbhook {
-    use super::{KB_CAPTURE, KB_QUEUE};
-    use std::sync::atomic::Ordering::Relaxed;
+    use super::{dbglog, KB_CAPTURE, KB_QUEUE};
+    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
     use std::sync::Once;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN,
-        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, SetWindowsHookExW, HHOOK,
+        KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
+    /// true nếu cửa sổ đang foreground thuộc đúng tiến trình viewer này.
+    /// Dùng sự thật của OS thay cho cờ `focused` của egui (hay sai sau khi phóng to).
+    unsafe fn fg_is_ours() -> bool {
+        let hwnd = GetForegroundWindow();
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut pid = 0u32;
+        GetWindowThreadProcessId(hwnd, Some(&mut pid));
+        pid != 0 && pid == GetCurrentProcessId()
+    }
+
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && KB_CAPTURE.load(Relaxed) {
+        if code >= 0 && KB_CAPTURE.load(Relaxed) && fg_is_ours() {
             let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
             let msg = wparam.0 as u32;
             let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -110,17 +140,29 @@ mod kbhook {
         CallNextHookEx(HHOOK::default(), code, wparam, lparam)
     }
 
+    pub static HOOK_OK: AtomicBool = AtomicBool::new(false);
     static INSTALL: Once = Once::new();
     pub fn install() {
         INSTALL.call_once(|| unsafe {
             let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-            let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HINSTANCE(hmod.0), 0);
+            match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HINSTANCE(hmod.0), 0) {
+                Ok(_) => {
+                    HOOK_OK.store(true, Relaxed);
+                    dbglog("[kbhook] cai dat móc ban phim: OK");
+                }
+                Err(e) => {
+                    HOOK_OK.store(false, Relaxed);
+                    dbglog(&format!("[kbhook] cai dat móc THAT BAI: {e:?}"));
+                }
+            }
         });
     }
 }
 
 #[cfg(not(windows))]
 mod kbhook {
+    use std::sync::atomic::AtomicBool;
+    pub static HOOK_OK: AtomicBool = AtomicBool::new(false);
     pub fn install() {}
 }
 
@@ -182,8 +224,8 @@ struct App {
     clip: Option<arboard::Clipboard>,
     last_clip: String,
     last_clip_poll: Instant,
-    last_mods: [bool; 3], // shift, ctrl, alt
-    last_keys: std::collections::HashSet<egui::Key>,
+    kb_sent: u64,
+    last_kb_log: Instant,
     poller_spawned: bool,
 }
 
@@ -215,8 +257,8 @@ impl Default for App {
             clip: arboard::Clipboard::new().ok(),
             last_clip: String::new(),
             last_clip_poll: Instant::now(),
-            last_mods: [false; 3],
-            last_keys: std::collections::HashSet::new(),
+            kb_sent: 0,
+            last_kb_log: Instant::now(),
             poller_spawned: false,
         }
     }
@@ -1178,10 +1220,21 @@ impl App {
         let title = self.shared.title.lock().unwrap().clone();
         let status = self.shared.status.lock().unwrap().clone();
 
-        // Chỉ bắt bàn phím khi đang điều khiển VÀ cửa sổ đang focus (để không
-        // nuốt phím lúc bố dùng ứng dụng khác).
-        let focused = ctx.input(|i| i.focused);
-        KB_CAPTURE.store(active && self.session_full && focused, Ordering::Relaxed);
+        // Bật bắt phím khi đang điều khiển toàn phần. Việc "chỉ gửi khi cửa sổ
+        // của mình đang foreground" được chính hook kiểm tra bằng OS (fg_is_ours),
+        // đáng tin hơn cờ focused của egui (hay sai sau khi phóng to cửa sổ).
+        KB_CAPTURE.store(active && self.session_full, Ordering::Relaxed);
+
+        // Log chẩn đoán mỗi 3s khi đang điều khiển (để soi nếu bàn phím lỗi).
+        if active && self.session_full && self.last_kb_log.elapsed() >= Duration::from_secs(3) {
+            self.last_kb_log = Instant::now();
+            dbglog(&format!(
+                "[kb] hook_ok={} capture={} da_gui={} phim",
+                kbhook::HOOK_OK.load(Ordering::Relaxed),
+                KB_CAPTURE.load(Ordering::Relaxed),
+                self.kb_sent
+            ));
+        }
 
         // Đồng bộ clipboard: copy bên máy xem -> dán được ngay bên máy con.
         if active && self.session_full
@@ -1298,6 +1351,7 @@ impl App {
         }
 
         let frame = egui::Frame::none().fill(Color32::BLACK);
+        let mut kb_sent_now: u64 = 0;
         egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
             if let Some(tex) = &self.tex {
                 let tsize = tex.size_vec2();
@@ -1329,6 +1383,7 @@ impl App {
                                         InputEvent::KeyUp { vk }
                                     };
                                     let _ = tx.send(ClientMessage::Input(ev));
+                                    kb_sent_now += 1;
                                 }
                             }
                             let norm = |p: egui::Pos2| -> (f32, f32) {
@@ -1397,6 +1452,7 @@ impl App {
                 });
             }
         });
+        self.kb_sent += kb_sent_now;
         ctx.request_repaint();
     }
 }
