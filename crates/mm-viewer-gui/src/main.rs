@@ -135,6 +135,7 @@ struct App {
     last_clip: String,
     last_clip_poll: Instant,
     last_mods: [bool; 3], // shift, ctrl, alt
+    last_keys: std::collections::HashSet<egui::Key>,
 }
 
 impl Default for App {
@@ -166,6 +167,7 @@ impl Default for App {
             last_clip: String::new(),
             last_clip_poll: Instant::now(),
             last_mods: [false; 3],
+            last_keys: std::collections::HashSet::new(),
         }
     }
 }
@@ -1180,6 +1182,11 @@ impl App {
                         });
                         let prev_mods = self.last_mods;
                         self.last_mods = cur_mods;
+                        // Đọc thẳng tập phím đang nhấn -> egui không "nuốt" được
+                        // Ctrl+C/V/X nữa; so sánh khung này với khung trước.
+                        let keys_now = ctx.input(|i| i.keys_down.clone());
+                        let prev_keys = std::mem::take(&mut self.last_keys);
+                        self.last_keys = keys_now.clone();
                         if let Some(tx) = &self.input_tx {
                             const MOD_VK: [u32; 3] = [0x10, 0x11, 0x12]; // Shift, Ctrl, Alt
                             for idx in 0..3 {
@@ -1190,6 +1197,16 @@ impl App {
                                         InputEvent::KeyUp { vk: MOD_VK[idx] }
                                     };
                                     let _ = tx.send(ClientMessage::Input(ev));
+                                }
+                            }
+                            for k in keys_now.difference(&prev_keys) {
+                                if let Some(vk) = map_key(*k) {
+                                    let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk }));
+                                }
+                            }
+                            for k in prev_keys.difference(&keys_now) {
+                                if let Some(vk) = map_key(*k) {
+                                    let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk }));
                                 }
                             }
                             let norm = |p: egui::Pos2| -> (f32, f32) {
@@ -1231,32 +1248,6 @@ impl App {
                                                 let _ =
                                                     tx.send(ClientMessage::Input(InputEvent::MouseWheel { delta: d }));
                                             }
-                                        }
-                                        egui::Event::Key { key, pressed, repeat, .. }
-                                            if !*repeat =>
-                                        {
-                                            if let Some(vk) = map_key(*key) {
-                                                let ev = if *pressed {
-                                                    InputEvent::KeyDown { vk }
-                                                } else {
-                                                    InputEvent::KeyUp { vk }
-                                                };
-                                                let _ = tx.send(ClientMessage::Input(ev));
-                                            }
-                                        }
-                                        // egui nuốt Ctrl+C/X/V thành lệnh copy/cut/paste
-                                        // -> gửi lại phím chữ (Ctrl đã có từ theo dõi modifier).
-                                        egui::Event::Copy => {
-                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk: 0x43 }));
-                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk: 0x43 }));
-                                        }
-                                        egui::Event::Cut => {
-                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk: 0x58 }));
-                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk: 0x58 }));
-                                        }
-                                        egui::Event::Paste(_) => {
-                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk: 0x56 }));
-                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk: 0x56 }));
                                         }
                                         _ => {}
                                     }
