@@ -102,19 +102,20 @@ static KB_QUEUE: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
 #[cfg(windows)]
 mod kbhook {
     use super::{dbglog, KB_CAPTURE, KB_QUEUE};
-    use std::sync::atomic::{AtomicBool, Ordering::Relaxed};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
     use std::sync::Once;
     use windows::core::PCWSTR;
-    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
     use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, GetForegroundWindow, GetWindowThreadProcessId, SetWindowsHookExW, HHOOK,
-        KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
+        SetWindowsHookExW, TranslateMessage, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN,
+        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
-    /// true nếu cửa sổ đang foreground thuộc đúng tiến trình viewer này.
-    /// Dùng sự thật của OS thay cho cờ `focused` của egui (hay sai sau khi phóng to).
+    /// true nếu cửa sổ đang foreground thuộc đúng tiến trình viewer này
+    /// (để không gửi phím lúc bố đang dùng ứng dụng khác).
     unsafe fn fg_is_ours() -> bool {
         let hwnd = GetForegroundWindow();
         if hwnd.0.is_null() {
@@ -126,14 +127,17 @@ mod kbhook {
     }
 
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
-        if code >= 0 && KB_CAPTURE.load(Relaxed) && fg_is_ours() {
-            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-            let msg = wparam.0 as u32;
-            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
-            let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
-            if down || up {
-                if let Ok(mut q) = KB_QUEUE.lock() {
-                    q.push((kb.vkCode, down));
+        if code >= 0 && KB_CAPTURE.load(Relaxed) {
+            HOOK_HITS.fetch_add(1, Relaxed);
+            if fg_is_ours() {
+                let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+                let msg = wparam.0 as u32;
+                let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+                let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+                if down || up {
+                    if let Ok(mut q) = KB_QUEUE.lock() {
+                        q.push((kb.vkCode, down));
+                    }
                 }
             }
         }
@@ -141,28 +145,42 @@ mod kbhook {
     }
 
     pub static HOOK_OK: AtomicBool = AtomicBool::new(false);
+    pub static HOOK_HITS: AtomicU64 = AtomicU64::new(0);
     static INSTALL: Once = Once::new();
+
+    /// Cài móc trên MỘT LUỒNG RIÊNG chỉ ngồi chờ thông điệp. Luồng chính của
+    /// egui vẽ lại liên tục nên Windows bỏ qua móc cấp thấp (timeout 300ms);
+    /// luồng riêng này luôn ở trạng thái chờ nên móc được gọi tức thì.
     pub fn install() {
-        INSTALL.call_once(|| unsafe {
-            let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
-            match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HINSTANCE(hmod.0), 0) {
-                Ok(_) => {
-                    HOOK_OK.store(true, Relaxed);
-                    dbglog("[kbhook] cai dat móc ban phim: OK");
+        INSTALL.call_once(|| {
+            std::thread::spawn(|| unsafe {
+                let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+                match SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HINSTANCE(hmod.0), 0) {
+                    Ok(_) => {
+                        HOOK_OK.store(true, Relaxed);
+                        dbglog("[kbhook] móc cài trên luồng riêng: OK");
+                    }
+                    Err(e) => {
+                        HOOK_OK.store(false, Relaxed);
+                        dbglog(&format!("[kbhook] cài móc THAT BAI: {e:?}"));
+                    }
                 }
-                Err(e) => {
-                    HOOK_OK.store(false, Relaxed);
-                    dbglog(&format!("[kbhook] cai dat móc THAT BAI: {e:?}"));
+                // Vòng lặp thông điệp giữ luồng ở trạng thái phục vụ móc.
+                let mut msg = MSG::default();
+                while GetMessageW(&mut msg, HWND::default(), 0, 0).as_bool() {
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
                 }
-            }
+            });
         });
     }
 }
 
 #[cfg(not(windows))]
 mod kbhook {
-    use std::sync::atomic::AtomicBool;
+    use std::sync::atomic::{AtomicBool, AtomicU64};
     pub static HOOK_OK: AtomicBool = AtomicBool::new(false);
+    pub static HOOK_HITS: AtomicU64 = AtomicU64::new(0);
     pub fn install() {}
 }
 
@@ -1229,9 +1247,10 @@ impl App {
         if active && self.session_full && self.last_kb_log.elapsed() >= Duration::from_secs(3) {
             self.last_kb_log = Instant::now();
             dbglog(&format!(
-                "[kb] hook_ok={} capture={} da_gui={} phim",
+                "[kb] hook_ok={} capture={} hits={} da_gui={} phim",
                 kbhook::HOOK_OK.load(Ordering::Relaxed),
                 KB_CAPTURE.load(Ordering::Relaxed),
+                kbhook::HOOK_HITS.load(Ordering::Relaxed),
                 self.kb_sent
             ));
         }
