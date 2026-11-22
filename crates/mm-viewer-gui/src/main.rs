@@ -98,38 +98,29 @@ const WIN_NARROW: [f32; 2] = [380.0, 640.0];
 // hệ điều hành (low-level keyboard hook), lấy mã VK thô, gửi nguyên sang máy con.
 static KB_CAPTURE: AtomicBool = AtomicBool::new(false);
 static KB_QUEUE: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
+// Cho phép gửi phím (chặn theo cửa sổ foreground). Tạm mặc định true.
+static FOCUS_OK: AtomicBool = AtomicBool::new(true);
 
 #[cfg(windows)]
 mod kbhook {
-    use super::{dbglog, KB_CAPTURE, KB_QUEUE};
+    use super::{dbglog, FOCUS_OK, KB_CAPTURE, KB_QUEUE};
     use std::sync::atomic::{AtomicBool, AtomicU64, Ordering::Relaxed};
     use std::sync::Once;
     use windows::core::PCWSTR;
     use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
     use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows::Win32::System::Threading::GetCurrentProcessId;
     use windows::Win32::UI::WindowsAndMessaging::{
-        CallNextHookEx, DispatchMessageW, GetForegroundWindow, GetMessageW, GetWindowThreadProcessId,
-        SetWindowsHookExW, TranslateMessage, HHOOK, KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN,
-        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+        CallNextHookEx, DispatchMessageW, GetMessageW, SetWindowsHookExW, TranslateMessage, HHOOK,
+        KBDLLHOOKSTRUCT, MSG, WH_KEYBOARD_LL, WM_KEYDOWN, WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
     };
 
-    /// true nếu cửa sổ đang foreground thuộc đúng tiến trình viewer này
-    /// (để không gửi phím lúc bố đang dùng ứng dụng khác).
-    unsafe fn fg_is_ours() -> bool {
-        let hwnd = GetForegroundWindow();
-        if hwnd.0.is_null() {
-            return false;
-        }
-        let mut pid = 0u32;
-        GetWindowThreadProcessId(hwnd, Some(&mut pid));
-        pid != 0 && pid == GetCurrentProcessId()
-    }
-
     unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        // Chỉ bắt khi KB_CAPTURE bật (đang điều khiển toàn phần máy con). Việc
+        // chặn theo cửa sổ foreground để riêng ở luồng chính (FOCUS_OK) để không
+        // phụ thuộc GetForegroundWindow gọi từ luồng này (hay trả sai).
         if code >= 0 && KB_CAPTURE.load(Relaxed) {
             HOOK_HITS.fetch_add(1, Relaxed);
-            if fg_is_ours() {
+            if FOCUS_OK.load(Relaxed) {
                 let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
                 let msg = wparam.0 as u32;
                 let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
@@ -1242,16 +1233,21 @@ impl App {
         // của mình đang foreground" được chính hook kiểm tra bằng OS (fg_is_ours),
         // đáng tin hơn cờ focused của egui (hay sai sau khi phóng to cửa sổ).
         KB_CAPTURE.store(active && self.session_full, Ordering::Relaxed);
+        // Tạm luôn cho gửi để chắc chắn gõ được; ghi lại focused của egui để vòng
+        // sau bật lại chặn-theo-cửa-sổ cho an toàn mà không làm hỏng gõ.
+        FOCUS_OK.store(true, Ordering::Relaxed);
+        let egui_focused = ctx.input(|i| i.focused);
 
         // Log chẩn đoán mỗi 3s khi đang điều khiển (để soi nếu bàn phím lỗi).
         if active && self.session_full && self.last_kb_log.elapsed() >= Duration::from_secs(3) {
             self.last_kb_log = Instant::now();
             dbglog(&format!(
-                "[kb] hook_ok={} capture={} hits={} da_gui={} phim",
+                "[kb] hook_ok={} capture={} hits={} da_gui={} egui_focused={} phim",
                 kbhook::HOOK_OK.load(Ordering::Relaxed),
                 KB_CAPTURE.load(Ordering::Relaxed),
                 kbhook::HOOK_HITS.load(Ordering::Relaxed),
-                self.kb_sent
+                self.kb_sent,
+                egui_focused,
             ));
         }
 
