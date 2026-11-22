@@ -184,6 +184,7 @@ struct App {
     last_clip_poll: Instant,
     last_mods: [bool; 3], // shift, ctrl, alt
     last_keys: std::collections::HashSet<egui::Key>,
+    poller_spawned: bool,
 }
 
 impl Default for App {
@@ -216,6 +217,7 @@ impl Default for App {
             last_clip_poll: Instant::now(),
             last_mods: [false; 3],
             last_keys: std::collections::HashSet::new(),
+            poller_spawned: false,
         }
     }
 }
@@ -490,6 +492,59 @@ async fn relay_send(s: &mut quinn::SendStream, m: &RelayMessage) -> anyhow::Resu
 }
 async fn relay_recv(r: &mut quinn::RecvStream) -> anyhow::Result<RelayMessage> {
     Ok(mm_proto::decode(&mm_transport::read_frame(r).await?)?)
+}
+
+/// Mở một kết nối ngắn tới relay, đăng nhập và lấy danh sách máy mới nhất.
+async fn fetch_devices(
+    endpoint: &quinn::Endpoint,
+    addr: std::net::SocketAddr,
+    account: &str,
+) -> anyhow::Result<Vec<DeviceInfo>> {
+    let conn = endpoint.connect(addr, "mm")?.await?;
+    let (mut cs, mut cr) = conn.open_bi().await?;
+    relay_send(&mut cs, &RelayMessage::LoginViewer { account: account.to_string() }).await?;
+    match relay_recv(&mut cr).await? {
+        RelayMessage::Devices(list) => Ok(list),
+        other => anyhow::bail!("chờ Devices, nhận {other:?}"),
+    }
+}
+
+/// Nền: cứ vài giây hỏi lại relay để danh bạ "sống" (máy mới hiện, máy tắt
+/// chuyển offline) mà không cần nâng cấp server.
+async fn device_poller(
+    relay_addr: String,
+    account: String,
+    shared: Arc<Shared>,
+    ctx: egui::Context,
+) {
+    let addr: std::net::SocketAddr = match relay_addr.trim().parse() {
+        Ok(a) => a,
+        Err(_) => return,
+    };
+    let endpoint = match mm_quic::client_endpoint() {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+        if !shared.logged_in.load(Ordering::SeqCst) {
+            continue;
+        }
+        if let Ok(list) = fetch_devices(&endpoint, addr, &account).await {
+            let changed = {
+                let mut cur = shared.devices.lock().unwrap();
+                if *cur != list {
+                    *cur = list;
+                    true
+                } else {
+                    false
+                }
+            };
+            if changed {
+                ctx.request_repaint();
+            }
+        }
+    }
 }
 
 // ---------------- input ----------------
@@ -924,6 +979,16 @@ impl App {
         let shared = self.shared.clone();
         let ctx2 = ctx.clone();
         self.rt.spawn(relay_manager(relay, acc, pw, nm, shared, ctx2, rx));
+        // Nền làm mới danh bạ mỗi vài giây (chỉ spawn một lần).
+        if !self.poller_spawned {
+            self.poller_spawned = true;
+            self.rt.spawn(device_poller(
+                self.relay_addr.clone(),
+                self.account.clone(),
+                self.shared.clone(),
+                ctx.clone(),
+            ));
+        }
         self.screen = Screen::Directory;
     }
 

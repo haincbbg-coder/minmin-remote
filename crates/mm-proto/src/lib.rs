@@ -151,7 +151,7 @@ pub struct FrameHeader {
 }
 
 /// Thông tin một máy con trong danh bạ relay.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     pub device_id: String,
     pub device_name: String,
