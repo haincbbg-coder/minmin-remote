@@ -134,6 +134,7 @@ struct App {
     clip: Option<arboard::Clipboard>,
     last_clip: String,
     last_clip_poll: Instant,
+    last_mods: [bool; 3], // shift, ctrl, alt
 }
 
 impl Default for App {
@@ -164,6 +165,7 @@ impl Default for App {
             clip: arboard::Clipboard::new().ok(),
             last_clip: String::new(),
             last_clip_poll: Instant::now(),
+            last_mods: [false; 3],
         }
     }
 }
@@ -1170,7 +1172,26 @@ impl App {
                         Color32::WHITE,
                     );
                     if active && self.session_full {
+                        // Shift/Ctrl/Alt: egui không gửi như phím thường mà để ở
+                        // modifiers -> tự phát hiện đổi trạng thái rồi gửi nhấn/nhả.
+                        let cur_mods = ctx.input(|i| {
+                            let m = i.modifiers;
+                            [m.shift, m.ctrl, m.alt]
+                        });
+                        let prev_mods = self.last_mods;
+                        self.last_mods = cur_mods;
                         if let Some(tx) = &self.input_tx {
+                            const MOD_VK: [u32; 3] = [0x10, 0x11, 0x12]; // Shift, Ctrl, Alt
+                            for idx in 0..3 {
+                                if cur_mods[idx] != prev_mods[idx] {
+                                    let ev = if cur_mods[idx] {
+                                        InputEvent::KeyDown { vk: MOD_VK[idx] }
+                                    } else {
+                                        InputEvent::KeyUp { vk: MOD_VK[idx] }
+                                    };
+                                    let _ = tx.send(ClientMessage::Input(ev));
+                                }
+                            }
                             let norm = |p: egui::Pos2| -> (f32, f32) {
                                 (
                                     ((p.x - rect.min.x) / rect.width()).clamp(0.0, 1.0),
