@@ -126,6 +126,26 @@ fn init_logging() {
     }
 }
 
+/// Đặt nội dung clipboard của máy con (nhận từ máy xem).
+fn set_remote_clipboard(text: &str) {
+    if let Ok(mut cb) = arboard::Clipboard::new() {
+        let _ = cb.set_text(text.to_owned());
+    }
+}
+
+/// Thực thi lệnh nguồn trên máy con.
+fn do_power(action: mm_proto::PowerAction) {
+    use mm_proto::PowerAction::*;
+    use std::process::Command;
+    info!("lệnh nguồn: {action:?}");
+    let _ = match action {
+        Lock => Command::new("rundll32.exe").arg("user32.dll,LockWorkStation").spawn(),
+        Restart => Command::new("shutdown").args(["/r", "/t", "0", "/f"]).spawn(),
+        Shutdown => Command::new("shutdown").args(["/s", "/t", "0", "/f"]).spawn(),
+        LogOff => Command::new("shutdown").args(["/l"]).spawn(),
+    };
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     init_logging();
@@ -379,6 +399,16 @@ async fn handle_conn_quic(mut session: mm_quic::ServerSession, args: Args) -> Re
                             }
                         }
                     }
+                    Ok(ClientMessage::Clipboard(text)) => {
+                        if allow_input {
+                            set_remote_clipboard(&text);
+                        }
+                    }
+                    Ok(ClientMessage::Power(action)) => {
+                        if allow_input {
+                            do_power(action);
+                        }
+                    }
                     Ok(_) => {}
                 }
             }
@@ -518,6 +548,16 @@ where
                             if let Err(e) = injector.inject(&ev) {
                                 warn!("tiêm input lỗi: {e}");
                             }
+                        }
+                    }
+                    Ok(ClientMessage::Clipboard(text)) => {
+                        if allow_input {
+                            set_remote_clipboard(&text);
+                        }
+                    }
+                    Ok(ClientMessage::Power(action)) => {
+                        if allow_input {
+                            do_power(action);
                         }
                     }
                     Ok(_) => {}

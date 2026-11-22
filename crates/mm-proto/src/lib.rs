@@ -31,8 +31,26 @@ pub enum ClientMessage {
     Ack { frame_seq: u64 },
     /// Chọn màn hình cần xem khi Server có nhiều màn hình (P2).
     SelectMonitor { index: u32 },
+    /// Đồng bộ clipboard: đặt nội dung clipboard của máy con (copy bên máy xem
+    /// -> dán được ngay bên máy con, kiểu Google Remote).
+    Clipboard(String),
+    /// Nút nguồn trên máy con (chỉ khi Điều khiển hoàn toàn).
+    Power(PowerAction),
     /// Ngắt kết nối một cách lịch sự.
     Bye,
+}
+
+/// Lệnh nguồn gửi tới máy con.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum PowerAction {
+    /// Khóa màn hình.
+    Lock,
+    /// Khởi động lại.
+    Restart,
+    /// Tắt máy.
+    Shutdown,
+    /// Đăng xuất.
+    LogOff,
 }
 
 /// Gói tin Server -> Viewer.

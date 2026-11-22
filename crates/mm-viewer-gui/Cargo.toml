@@ -19,3 +19,4 @@ mm-codec = { path = "../mm-codec" }
 mm-transport = { path = "../mm-transport" }
 mm-crypto = { path = "../mm-crypto" }
 quinn = "0.11"
+arboard = "3"

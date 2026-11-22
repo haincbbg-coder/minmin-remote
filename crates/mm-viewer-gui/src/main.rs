@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use egui::{Align2, Color32, CursorIcon, FontFamily, FontId, RichText, Rounding, Sense, Stroke};
 use mm_codec::{Decoder, EncodedFrame};
 use mm_proto::{
-    ClientMessage, DeviceInfo, FrameCodec, FrameHeader, InputEvent, MouseButton, RelayMessage,
-    ServerMessage, SessionMode, PROTOCOL_VERSION,
+    ClientMessage, DeviceInfo, FrameCodec, FrameHeader, InputEvent, MouseButton, PowerAction,
+    RelayMessage, ServerMessage, SessionMode, PROTOCOL_VERSION,
 };
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -106,7 +106,7 @@ enum Cmd {
     Connect {
         device_id: String,
         full: bool,
-        input_rx: UnboundedReceiver<InputEvent>,
+        input_rx: UnboundedReceiver<ClientMessage>,
     },
 }
 
@@ -125,12 +125,15 @@ struct App {
     password: String,
     name: String,
     cmd_tx: Option<UnboundedSender<Cmd>>,
-    input_tx: Option<UnboundedSender<InputEvent>>,
+    input_tx: Option<UnboundedSender<ClientMessage>>,
     tex: Option<egui::TextureHandle>,
     last_frame_id: u64,
     session_full: bool,
     current_device: String,
     auto_login: bool,
+    clip: Option<arboard::Clipboard>,
+    last_clip: String,
+    last_clip_poll: Instant,
 }
 
 impl Default for App {
@@ -158,6 +161,9 @@ impl Default for App {
             session_full: true,
             current_device: String::new(),
             auto_login: auto,
+            clip: arboard::Clipboard::new().ok(),
+            last_clip: String::new(),
+            last_clip_poll: Instant::now(),
         }
     }
 }
@@ -290,7 +296,7 @@ async fn connect_device(
     name: &str,
     shared: &Arc<Shared>,
     ctx: &egui::Context,
-    input_rx: UnboundedReceiver<InputEvent>,
+    input_rx: UnboundedReceiver<ClientMessage>,
 ) -> anyhow::Result<()> {
     relay_send(cs, &RelayMessage::ConnectTo { device_id: device_id.to_string() }).await?;
     let (session, peer_addr) = match relay_recv(cr).await? {
@@ -326,7 +332,7 @@ async fn drive_quic(
     name: &str,
     shared: Arc<Shared>,
     ctx: egui::Context,
-    mut input_rx: UnboundedReceiver<InputEvent>,
+    mut input_rx: UnboundedReceiver<ClientMessage>,
     direct: bool,
 ) -> anyhow::Result<()> {
     cs.control
@@ -359,8 +365,8 @@ async fn drive_quic(
         }
     });
 
-    while let Some(ev) = input_rx.recv().await {
-        if cs.control.send(&ClientMessage::Input(ev)).await.is_err() {
+    while let Some(msg) = input_rx.recv().await {
+        if cs.control.send(&msg).await.is_err() {
             break;
         }
     }
@@ -376,7 +382,7 @@ async fn drive_relay<S>(
     name: &str,
     shared: Arc<Shared>,
     ctx: egui::Context,
-    mut input_rx: UnboundedReceiver<InputEvent>,
+    mut input_rx: UnboundedReceiver<ClientMessage>,
 ) -> anyhow::Result<()>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send + 'static,
@@ -417,8 +423,8 @@ where
         }
     });
 
-    while let Some(ev) = input_rx.recv().await {
-        if writer.send(&ClientMessage::Input(ev)).await.is_err() {
+    while let Some(msg) = input_rx.recv().await {
+        if writer.send(&msg).await.is_err() {
             break;
         }
     }
@@ -1001,7 +1007,7 @@ impl App {
             self.do_logout();
         }
         if let Some((device_id, full)) = to_connect {
-            let (tx, rx) = unbounded_channel::<InputEvent>();
+            let (tx, rx) = unbounded_channel::<ClientMessage>();
             self.input_tx = Some(tx);
             self.session_full = full;
             self.current_device = device_id.clone();
@@ -1028,6 +1034,26 @@ impl App {
         let stats = *self.shared.stats.lock().unwrap();
         let title = self.shared.title.lock().unwrap().clone();
         let status = self.shared.status.lock().unwrap().clone();
+
+        // Đồng bộ clipboard: copy bên máy xem -> dán được ngay bên máy con.
+        if active && self.session_full
+            && self.last_clip_poll.elapsed() >= Duration::from_millis(500)
+        {
+            self.last_clip_poll = Instant::now();
+            if let Some(cb) = &mut self.clip {
+                if let Ok(txt) = cb.get_text() {
+                    if !txt.is_empty() && txt != self.last_clip {
+                        self.last_clip = txt.clone();
+                        if let Some(tx) = &self.input_tx {
+                            let _ = tx.send(ClientMessage::Clipboard(txt));
+                        }
+                    }
+                }
+            }
+        }
+
+        let mut power_action: Option<PowerAction> = None;
+        let full = self.session_full;
 
         let topframe = egui::Frame::none()
             .fill(CARD)
@@ -1056,6 +1082,24 @@ impl App {
                 } else {
                     ui.label(RichText::new("· 👁 Chỉ xem").size(12.5).color(AMBER));
                 }
+                if full {
+                    ui.add_space(6.0);
+                    ui.menu_button(sb("⏻ Nguồn"), |ui| {
+                        ui.set_min_width(170.0);
+                        if ui.button("🔒  Khóa máy").clicked() {
+                            power_action = Some(PowerAction::Lock);
+                            ui.close_menu();
+                        }
+                        if ui.button("🔁  Khởi động lại").clicked() {
+                            power_action = Some(PowerAction::Restart);
+                            ui.close_menu();
+                        }
+                        if ui.button("⏻  Tắt máy").clicked() {
+                            power_action = Some(PowerAction::Shutdown);
+                            ui.close_menu();
+                        }
+                    });
+                }
 
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if active {
@@ -1080,6 +1124,12 @@ impl App {
                 });
             });
         });
+
+        if let Some(a) = power_action {
+            if let Some(tx) = &self.input_tx {
+                let _ = tx.send(ClientMessage::Power(a));
+            }
+        }
 
         let fid = self.shared.frame_id.load(Ordering::SeqCst);
         if fid != self.last_frame_id {
@@ -1132,7 +1182,8 @@ impl App {
                                     match e {
                                         egui::Event::PointerMoved(p) if rect.contains(*p) => {
                                             let (x, y) = norm(*p);
-                                            let _ = tx.send(InputEvent::MouseMove { x, y });
+                                            let _ =
+                                                tx.send(ClientMessage::Input(InputEvent::MouseMove { x, y }));
                                         }
                                         egui::Event::PointerButton {
                                             pos, button, pressed, ..
@@ -1144,7 +1195,7 @@ impl App {
                                                 } else {
                                                     InputEvent::MouseUp { button: b, x, y }
                                                 };
-                                                let _ = tx.send(ev);
+                                                let _ = tx.send(ClientMessage::Input(ev));
                                             }
                                         }
                                         egui::Event::MouseWheel { delta, .. } => {
@@ -1157,7 +1208,7 @@ impl App {
                                             };
                                             if d != 0 {
                                                 let _ =
-                                                    tx.send(InputEvent::MouseWheel { delta: d });
+                                                    tx.send(ClientMessage::Input(InputEvent::MouseWheel { delta: d }));
                                             }
                                         }
                                         egui::Event::Key { key, pressed, repeat, .. }
@@ -1169,7 +1220,7 @@ impl App {
                                                 } else {
                                                     InputEvent::KeyUp { vk }
                                                 };
-                                                let _ = tx.send(ev);
+                                                let _ = tx.send(ClientMessage::Input(ev));
                                             }
                                         }
                                         _ => {}
