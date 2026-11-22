@@ -20,3 +20,10 @@ mm-transport = { path = "../mm-transport" }
 mm-crypto = { path = "../mm-crypto" }
 quinn = "0.11"
 arboard = "3"
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.58", features = [
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+] }

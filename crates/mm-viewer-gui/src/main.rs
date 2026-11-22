@@ -76,6 +76,54 @@ fn save_config(relay: &str, account: &str, password: &str, name: &str) {
 
 const WIN_NARROW: [f32; 2] = [380.0, 640.0];
 
+// ---------------- bàn phím: bắt thẳng từ Windows (bỏ qua egui) ----------------
+// egui "nuốt" Ctrl+C/V/X và lọc phím -> vá mãi không hết. Nên bắt phím ở tầng
+// hệ điều hành (low-level keyboard hook), lấy mã VK thô, gửi nguyên sang máy con.
+static KB_CAPTURE: AtomicBool = AtomicBool::new(false);
+static KB_QUEUE: Mutex<Vec<(u32, bool)>> = Mutex::new(Vec::new());
+
+#[cfg(windows)]
+mod kbhook {
+    use super::{KB_CAPTURE, KB_QUEUE};
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::sync::Once;
+    use windows::core::PCWSTR;
+    use windows::Win32::Foundation::{HINSTANCE, LPARAM, LRESULT, WPARAM};
+    use windows::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        CallNextHookEx, SetWindowsHookExW, HHOOK, KBDLLHOOKSTRUCT, WH_KEYBOARD_LL, WM_KEYDOWN,
+        WM_KEYUP, WM_SYSKEYDOWN, WM_SYSKEYUP,
+    };
+
+    unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+        if code >= 0 && KB_CAPTURE.load(Relaxed) {
+            let kb = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+            let msg = wparam.0 as u32;
+            let down = msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN;
+            let up = msg == WM_KEYUP || msg == WM_SYSKEYUP;
+            if down || up {
+                if let Ok(mut q) = KB_QUEUE.lock() {
+                    q.push((kb.vkCode, down));
+                }
+            }
+        }
+        CallNextHookEx(HHOOK::default(), code, wparam, lparam)
+    }
+
+    static INSTALL: Once = Once::new();
+    pub fn install() {
+        INSTALL.call_once(|| unsafe {
+            let hmod = GetModuleHandleW(PCWSTR::null()).unwrap_or_default();
+            let _ = SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), HINSTANCE(hmod.0), 0);
+        });
+    }
+}
+
+#[cfg(not(windows))]
+mod kbhook {
+    pub fn install() {}
+}
+
 struct FrameBuf {
     w: u32,
     h: u32,
@@ -772,6 +820,7 @@ fn app_icon() -> egui::IconData {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _f: &mut eframe::Frame) {
+        kbhook::install();
         // Lần mở đầu: nếu đã lưu mật khẩu -> tự kết nối luôn (như Radmin VPN).
         if self.auto_login {
             self.auto_login = false;
@@ -780,8 +829,14 @@ impl eframe::App for App {
             }
         }
         match self.screen {
-            Screen::Login => self.login_ui(ctx),
-            Screen::Directory => self.directory_ui(ctx),
+            Screen::Login => {
+                KB_CAPTURE.store(false, Ordering::Relaxed);
+                self.login_ui(ctx)
+            }
+            Screen::Directory => {
+                KB_CAPTURE.store(false, Ordering::Relaxed);
+                self.directory_ui(ctx)
+            }
             Screen::Session => self.session_ui(ctx),
         }
     }
@@ -1058,6 +1113,11 @@ impl App {
         let title = self.shared.title.lock().unwrap().clone();
         let status = self.shared.status.lock().unwrap().clone();
 
+        // Chỉ bắt bàn phím khi đang điều khiển VÀ cửa sổ đang focus (để không
+        // nuốt phím lúc bố dùng ứng dụng khác).
+        let focused = ctx.input(|i| i.focused);
+        KB_CAPTURE.store(active && self.session_full && focused, Ordering::Relaxed);
+
         // Đồng bộ clipboard: copy bên máy xem -> dán được ngay bên máy con.
         if active && self.session_full
             && self.last_clip_poll.elapsed() >= Duration::from_millis(500)
@@ -1193,39 +1253,17 @@ impl App {
                         Color32::WHITE,
                     );
                     if active && self.session_full {
-                        // Shift/Ctrl/Alt: egui không gửi như phím thường mà để ở
-                        // modifiers -> tự phát hiện đổi trạng thái rồi gửi nhấn/nhả.
-                        let cur_mods = ctx.input(|i| {
-                            let m = i.modifiers;
-                            [m.shift, m.ctrl, m.alt]
-                        });
-                        let prev_mods = self.last_mods;
-                        self.last_mods = cur_mods;
-                        // Đọc thẳng tập phím đang nhấn -> egui không "nuốt" được
-                        // Ctrl+C/V/X nữa; so sánh khung này với khung trước.
-                        let keys_now = ctx.input(|i| i.keys_down.clone());
-                        let prev_keys = std::mem::take(&mut self.last_keys);
-                        self.last_keys = keys_now.clone();
                         if let Some(tx) = &self.input_tx {
-                            const MOD_VK: [u32; 3] = [0x10, 0x11, 0x12]; // Shift, Ctrl, Alt
-                            for idx in 0..3 {
-                                if cur_mods[idx] != prev_mods[idx] {
-                                    let ev = if cur_mods[idx] {
-                                        InputEvent::KeyDown { vk: MOD_VK[idx] }
+                            // Bàn phím: lấy mã phím thô từ hook OS -> gửi nguyên
+                            // sang máy con (đủ mọi phím/tổ hợp, không qua egui).
+                            if let Ok(mut q) = KB_QUEUE.lock() {
+                                for (vk, down) in q.drain(..) {
+                                    let ev = if down {
+                                        InputEvent::KeyDown { vk }
                                     } else {
-                                        InputEvent::KeyUp { vk: MOD_VK[idx] }
+                                        InputEvent::KeyUp { vk }
                                     };
                                     let _ = tx.send(ClientMessage::Input(ev));
-                                }
-                            }
-                            for k in keys_now.difference(&prev_keys) {
-                                if let Some(vk) = map_key(*k) {
-                                    let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk }));
-                                }
-                            }
-                            for k in prev_keys.difference(&keys_now) {
-                                if let Some(vk) = map_key(*k) {
-                                    let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk }));
                                 }
                             }
                             let norm = |p: egui::Pos2| -> (f32, f32) {
