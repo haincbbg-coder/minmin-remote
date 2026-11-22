@@ -131,6 +131,17 @@ async fn main() -> Result<()> {
     init_logging();
     info!("mm-server khởi động (pid {})", std::process::id());
 
+    // Chỉ cho chạy MỘT bản cùng lúc (khoá bằng cổng loopback). Nhờ vậy nhiều
+    // cơ chế tự chạy (Registry Run + Task Scheduler) có lỡ cùng bật cũng không
+    // tạo 2 tiến trình đánh nhau — cái nào tới trước giữ khoá, cái sau tự thoát.
+    let _single = match std::net::UdpSocket::bind("127.0.0.1:49677") {
+        Ok(s) => s,
+        Err(_) => {
+            info!("đã có mm-server khác đang chạy -> thoát bản này");
+            return Ok(());
+        }
+    };
+
     let args = Args::parse();
     if args.relay.is_some() {
         // Chạy nền bền bỉ: lặp vô hạn, cứ rớt là tự nối lại sau vài giây.

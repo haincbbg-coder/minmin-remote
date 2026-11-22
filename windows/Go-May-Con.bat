@@ -13,11 +13,13 @@ setlocal
 set "DIR=%LOCALAPPDATA%\MinMinRemote"
 set "STARTUP=%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup"
 set "TASK=MinMinRemote"
+set "RUNKEY=HKCU\Software\Microsoft\Windows\CurrentVersion\Run"
 set "WL=HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\Winlogon"
 
 echo Dang go cai dat may con...
 schtasks /end /tn "%TASK%" >nul 2>&1
 schtasks /delete /tn "%TASK%" /f >nul 2>&1
+reg delete "%RUNKEY%" /v "%TASK%" /f >nul 2>&1
 del "%STARTUP%\MinMinRemote.vbs" >nul 2>&1
 taskkill /IM mm-server.exe /F >nul 2>&1
 rd /s /q "%DIR%" >nul 2>&1
