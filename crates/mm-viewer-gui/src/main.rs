@@ -1244,6 +1244,20 @@ impl App {
                                                 let _ = tx.send(ClientMessage::Input(ev));
                                             }
                                         }
+                                        // egui nuốt Ctrl+C/X/V thành lệnh copy/cut/paste
+                                        // -> gửi lại phím chữ (Ctrl đã có từ theo dõi modifier).
+                                        egui::Event::Copy => {
+                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk: 0x43 }));
+                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk: 0x43 }));
+                                        }
+                                        egui::Event::Cut => {
+                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk: 0x58 }));
+                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk: 0x58 }));
+                                        }
+                                        egui::Event::Paste(_) => {
+                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyDown { vk: 0x56 }));
+                                            let _ = tx.send(ClientMessage::Input(InputEvent::KeyUp { vk: 0x56 }));
+                                        }
                                         _ => {}
                                     }
                                 }
