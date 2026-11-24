@@ -92,6 +92,8 @@ fn save_config(relay: &str, account: &str, password: &str, name: &str) {
 }
 
 const WIN_NARROW: [f32; 2] = [380.0, 640.0];
+/// Cửa sổ màn hình chính kiểu AloGo (2 cột: kết nối nhanh + danh bạ).
+const WIN_HOME: [f32; 2] = [860.0, 580.0];
 
 // ---------------- bàn phím: bắt thẳng từ Windows (bỏ qua egui) ----------------
 // egui "nuốt" Ctrl+C/V/X và lọc phím -> vá mãi không hết. Nên bắt phím ở tầng
@@ -236,6 +238,8 @@ struct App {
     kb_sent: u64,
     last_kb_log: Instant,
     poller_spawned: bool,
+    search: String,
+    quick_id: String,
 }
 
 impl Default for App {
@@ -269,6 +273,8 @@ impl Default for App {
             kb_sent: 0,
             last_kb_log: Instant::now(),
             poller_spawned: false,
+            search: String::new(),
+            quick_id: String::new(),
         }
     }
 }
@@ -1058,90 +1064,53 @@ impl App {
         let mut go_login = false;
         let mut to_connect: Option<(String, bool)> = None;
 
-        // ---- thanh menu: Hệ thống / Mạng / Trợ giúp ----
-        let menuframe = egui::Frame::none()
-            .fill(CARD)
-            .inner_margin(egui::Margin::symmetric(8.0, 3.0))
-            .stroke(Stroke::new(1.0, BORDER));
-        egui::TopBottomPanel::top("menubar").frame(menuframe).show(ctx, |ui| {
-            egui::menu::bar(ui, |ui| {
-                ui.menu_button(sb("Hệ thống"), |ui| {
-                    if ui.button("➕  Cửa sổ mới (xem máy khác)").clicked() {
-                        if let Ok(exe) = std::env::current_exe() {
-                            let _ = std::process::Command::new(exe).spawn();
-                        }
-                        ui.close_menu();
-                    }
-                    ui.separator();
-                    if ui.button("Đăng xuất").clicked() {
-                        do_logout = true;
-                        ui.close_menu();
-                    }
-                    if ui.button("Thoát").clicked() {
-                        do_quit = true;
-                        ui.close_menu();
-                    }
-                });
-                ui.menu_button(sb("Mạng"), |ui| {
-                    ui.label(RichText::new(format!("Cầu nối: {relay_addr}")).size(12.5).color(MUTED));
-                    ui.label(RichText::new(format!("Tài khoản: {account}")).size(12.5).color(MUTED));
-                });
-                ui.menu_button(sb("Trợ giúp"), |ui| {
-                    ui.label(sb("MinMin Remote").color(TEXT));
-                    ui.label(
-                        RichText::new("Điều khiển máy từ xa · mã hoá đầu cuối")
-                            .size(12.5)
-                            .color(MUTED),
-                    );
-                });
-            });
-        });
-
-        // ---- header: nút nguồn ON + tài khoản + trạng thái ----
+        // ---- header gọn: logo + tên + trạng thái + menu ----
         let headframe = egui::Frame::none()
             .fill(CARD)
-            .inner_margin(egui::Margin::symmetric(16.0, 14.0))
+            .inner_margin(egui::Margin::symmetric(16.0, 10.0))
             .stroke(Stroke::new(1.0, BORDER));
-        egui::TopBottomPanel::top("powerbar").frame(headframe).show(ctx, |ui| {
+        egui::TopBottomPanel::top("header").frame(headframe).show(ctx, |ui| {
             ui.horizontal(|ui| {
-                let (prect, presp) = ui.allocate_exact_size(egui::vec2(58.0, 58.0), Sense::click());
-                paint_power(ui.painter(), prect.center() - egui::vec2(0.0, 4.0), 22.0, logged);
-                ui.painter().text(
-                    egui::pos2(prect.center().x, prect.bottom() - 2.0),
-                    Align2::CENTER_BOTTOM,
-                    if logged { "ON" } else { "OFF" },
-                    FontId::new(12.0, sbfam()),
-                    if logged { TEAL } else { MUTED },
-                );
-                if presp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
-                    do_logout = true;
-                }
-                ui.add_space(8.0);
-                ui.vertical(|ui| {
-                    ui.add_space(4.0);
-                    ui.label(sb(account.to_uppercase()).size(18.0).color(TEXT));
-                    ui.add_space(3.0);
-                    ui.horizontal(|ui| {
-                        if logged {
-                            ui.label(RichText::new("● Trực tuyến").size(12.5).color(GREEN));
-                        } else {
-                            ui.label(RichText::new("● Đang kết nối…").size(12.5).color(AMBER));
+                paint_badge(ui, 30.0);
+                ui.add_space(9.0);
+                ui.label(sb("MinMin Remote").size(17.0).color(TEXT));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button(sb("☰").size(17.0), |ui| {
+                        ui.set_min_width(200.0);
+                        if ui.button("➕  Cửa sổ mới (xem máy khác)").clicked() {
+                            if let Ok(exe) = std::env::current_exe() {
+                                let _ = std::process::Command::new(exe).spawn();
+                            }
+                            ui.close_menu();
                         }
-                        ui.label(
-                            RichText::new(format!("· {online}/{} máy", devices.len()))
-                                .size(12.5)
-                                .color(MUTED),
-                        );
+                        ui.separator();
+                        if ui.button("Đăng xuất").clicked() {
+                            do_logout = true;
+                            ui.close_menu();
+                        }
+                        if ui.button("Thoát").clicked() {
+                            do_quit = true;
+                            ui.close_menu();
+                        }
                     });
+                    ui.add_space(10.0);
+                    if logged {
+                        ui.label(
+                            RichText::new(format!("● Trực tuyến · {online}/{} máy", devices.len()))
+                                .size(12.5)
+                                .color(GREEN),
+                        );
+                    } else {
+                        ui.label(RichText::new("● Đang kết nối…").size(12.5).color(AMBER));
+                    }
                 });
             });
         });
 
-        // ---- thân: danh sách máy ----
-        let frame = egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(0.0));
-        egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
-            if !logged {
-                ui.add_space(50.0);
+        if !logged {
+            let frame = egui::Frame::none().fill(BG);
+            egui::CentralPanel::default().frame(frame).show(ctx, |ui| {
+                ui.add_space(60.0);
                 ui.vertical_centered(|ui| {
                     if let Some(e) = &err {
                         ui.label(RichText::new(format!("⚠  {e}")).color(RED).size(14.0));
@@ -1156,39 +1125,160 @@ impl App {
                     }
                 });
                 ctx.request_repaint_after(Duration::from_millis(120));
-                return;
-            }
-
-            if devices.is_empty() {
-                ui.add_space(60.0);
-                ui.vertical_centered(|ui| {
-                    ui.label(RichText::new("🖥").size(34.0).color(MUTED));
-                    ui.add_space(6.0);
-                    ui.label(sb("Chưa có máy nào online").size(15.0).color(TEXT));
-                    ui.add_space(2.0);
-                    ui.label(
-                        RichText::new("Mở MinMin Server trên máy con rồi chờ chút.")
-                            .size(13.0)
-                            .color(MUTED),
-                    );
-                });
-                ctx.request_repaint_after(Duration::from_millis(400));
-                return;
-            }
-
-            let pulse = {
-                let t = ui.input(|i| i.time);
-                0.5 + 0.5 * ((t * 2.0).sin() as f32)
-            };
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (i, d) in devices.iter().enumerate() {
-                    if let Some(full) = device_row(ui, d, i, pulse) {
-                        to_connect = Some((d.device_id.clone(), full));
-                    }
-                }
             });
-            ctx.request_repaint_after(Duration::from_millis(40));
-        });
+        } else {
+            // ---- CỘT TRÁI: kết nối nhanh + thông tin tài khoản ----
+            let leftframe = egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(14.0));
+            egui::SidePanel::left("quick")
+                .resizable(false)
+                .exact_width(300.0)
+                .frame(leftframe)
+                .show(ctx, |ui| {
+                    let card = egui::Frame::none()
+                        .fill(CARD)
+                        .rounding(Rounding::same(14.0))
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .inner_margin(egui::Margin::same(16.0));
+                    card.show(ui, |ui| {
+                        ui.label(sb("Kết nối nhanh").size(15.0).color(TEXT));
+                        ui.add_space(3.0);
+                        ui.label(RichText::new("Nhập ID máy cần điều khiển").size(12.0).color(MUTED));
+                        ui.add_space(9.0);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.quick_id)
+                                .hint_text("ID máy")
+                                .desired_width(f32::INFINITY),
+                        );
+                        ui.add_space(10.0);
+                        ui.horizontal(|ui| {
+                            let w = (ui.available_width() - 8.0) / 2.0;
+                            let b1 = egui::Button::new(sb("Điều khiển").color(WHITE))
+                                .fill(ACCENT)
+                                .rounding(Rounding::same(9.0))
+                                .min_size(egui::vec2(w, 38.0));
+                            if ui.add(b1).clicked() {
+                                let id = self.quick_id.trim().to_string();
+                                if !id.is_empty() {
+                                    to_connect = Some((id, true));
+                                }
+                            }
+                            let b2 = egui::Button::new(sb("Chỉ xem").color(TEXT))
+                                .fill(CARD2)
+                                .rounding(Rounding::same(9.0))
+                                .min_size(egui::vec2(w, 38.0));
+                            if ui.add(b2).clicked() {
+                                let id = self.quick_id.trim().to_string();
+                                if !id.is_empty() {
+                                    to_connect = Some((id, false));
+                                }
+                            }
+                        });
+                    });
+
+                    ui.add_space(12.0);
+                    let card2 = egui::Frame::none()
+                        .fill(CARD)
+                        .rounding(Rounding::same(14.0))
+                        .stroke(Stroke::new(1.0, BORDER))
+                        .inner_margin(egui::Margin::same(16.0));
+                    card2.show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            let (prect, presp) =
+                                ui.allocate_exact_size(egui::vec2(48.0, 48.0), Sense::click());
+                            paint_power(ui.painter(), prect.center(), 18.0, logged);
+                            if presp.on_hover_cursor(CursorIcon::PointingHand).clicked() {
+                                do_logout = true;
+                            }
+                            ui.add_space(8.0);
+                            ui.vertical(|ui| {
+                                ui.label(sb(account.to_uppercase()).size(16.0).color(TEXT));
+                                ui.add_space(2.0);
+                                ui.label(
+                                    RichText::new(format!("● Trực tuyến · {online}/{} máy", devices.len()))
+                                        .size(12.0)
+                                        .color(GREEN),
+                                );
+                            });
+                        });
+                        ui.add_space(8.0);
+                        ui.label(
+                            RichText::new(format!("Cầu nối: {relay_addr}"))
+                                .size(11.0)
+                                .color(mix(MUTED, BG, 0.2)),
+                        );
+                        ui.add_space(2.0);
+                        ui.label(
+                            RichText::new("Mã hoá đầu cuối")
+                                .size(11.0)
+                                .color(mix(MUTED, BG, 0.2)),
+                        );
+                    });
+                });
+
+            // ---- CỘT PHẢI: danh bạ có ô tìm ----
+            let rightframe = egui::Frame::none().fill(BG).inner_margin(egui::Margin::same(14.0));
+            egui::CentralPanel::default().frame(rightframe).show(ctx, |ui| {
+                let card = egui::Frame::none()
+                    .fill(CARD)
+                    .rounding(Rounding::same(14.0))
+                    .stroke(Stroke::new(1.0, BORDER))
+                    .inner_margin(egui::Margin::same(14.0));
+                card.show(ui, |ui| {
+                    ui.label(sb("Thiết bị của tôi").size(15.0).color(TEXT));
+                    ui.add_space(8.0);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.search)
+                            .hint_text("🔍  Tìm theo tên hoặc ID")
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.add_space(8.0);
+
+                    let q = self.search.trim().to_lowercase();
+                    let filtered: Vec<&DeviceInfo> = devices
+                        .iter()
+                        .filter(|d| {
+                            q.is_empty()
+                                || d.device_name.to_lowercase().contains(&q)
+                                || d.device_id.to_lowercase().contains(&q)
+                        })
+                        .collect();
+
+                    if devices.is_empty() {
+                        ui.add_space(40.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("🖥").size(32.0).color(MUTED));
+                            ui.add_space(6.0);
+                            ui.label(sb("Chưa có máy nào online").size(14.0).color(TEXT));
+                            ui.add_space(2.0);
+                            ui.label(
+                                RichText::new("Mở MinMin Server trên máy con rồi chờ chút.")
+                                    .size(12.5)
+                                    .color(MUTED),
+                            );
+                        });
+                        ctx.request_repaint_after(Duration::from_millis(400));
+                    } else if filtered.is_empty() {
+                        ui.add_space(40.0);
+                        ui.vertical_centered(|ui| {
+                            ui.label(RichText::new("Không tìm thấy máy khớp.").size(13.0).color(MUTED));
+                        });
+                    } else {
+                        let pulse = {
+                            let t = ui.input(|i| i.time);
+                            0.5 + 0.5 * ((t * 2.0).sin() as f32)
+                        };
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for (i, d) in filtered.into_iter().enumerate() {
+                                if let Some(full) = device_row(ui, d, i, pulse) {
+                                    to_connect = Some((d.device_id.clone(), full));
+                                }
+                            }
+                        });
+                        ctx.request_repaint_after(Duration::from_millis(40));
+                    }
+                });
+            });
+        }
 
         // ---- áp dụng hành động ----
         if do_quit {
@@ -1282,8 +1372,8 @@ impl App {
                     self.shared.session_active.store(false, Ordering::SeqCst);
                     ctx.send_viewport_cmd(egui::ViewportCommand::Maximized(false));
                     ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(egui::vec2(
-                        WIN_NARROW[0],
-                        WIN_NARROW[1],
+                        WIN_HOME[0],
+                        WIN_HOME[1],
                     )));
                     self.screen = Screen::Directory;
                 }
@@ -1475,8 +1565,8 @@ impl App {
 fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size(WIN_NARROW)
-            .with_min_inner_size([340.0, 460.0])
+            .with_inner_size(WIN_HOME)
+            .with_min_inner_size([560.0, 480.0])
             .with_title("MinMin Remote")
             .with_icon(app_icon()),
         ..Default::default()
